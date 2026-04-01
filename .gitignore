@@ -1,0 +1,10 @@
+# Local secrets
+config.py
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Generated previews
+preview_*.html
