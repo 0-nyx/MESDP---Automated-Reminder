@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from datetime import datetime
 from tkinter import messagebox, ttk
@@ -84,6 +85,7 @@ class SchedulerGui:
         self._build_ui()
         self.root.bind_all("<Control-comma>", lambda _e: self.open_shift_settings_window())
         self.refresh_status()
+        self._start_process_watchdog()
 
     # ── Persistence ───────────────────────────────────────────────────────────
 
@@ -138,6 +140,51 @@ class SchedulerGui:
             if all(os.path.exists(os.path.join(base, n)) for n in required):
                 return base
         return candidates[0]
+
+    # ── Process watchdog ─────────────────────────────────────────────────────
+
+    def _start_process_watchdog(self) -> None:
+        """Background thread: polls process state every 5s, updates UI on change."""
+        def _poll():
+            while True:
+                time.sleep(5)
+                try:
+                    _, out = self._quick_check_process()
+                    out_up = out.upper()
+                    new_state = "RUNNING" if "RUNNING" in out_up and "NOT RUNNING" not in out_up else "NOT RUNNING"
+                    if new_state != self.current_scheduler_state:
+                        self.root.after(0, lambda s=new_state: self._on_watchdog_state_change(s))
+                except Exception:
+                    pass
+        threading.Thread(target=_poll, daemon=True).start()
+
+    def _quick_check_process(self) -> tuple[int, str]:
+        cmd = ("$r=Get-CimInstance Win32_Process"
+               "|Where-Object{$_.CommandLine -and "
+               "$_.CommandLine -like '*worklog_reminder.py*--schedule*'};"
+               "if($r){'RUNNING'}else{'NOT RUNNING'}")
+        kw: dict = {"capture_output": True, "text": True, "encoding": "utf-8", "errors": "replace"}
+        if os.name == "nt":
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 0
+            kw["startupinfo"] = si
+            kw["creationflags"] = subprocess.CREATE_NO_WINDOW
+        p = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd], **kw)
+        return p.returncode, (p.stdout or "").strip()
+
+    def _on_watchdog_state_change(self, new_state: str) -> None:
+        self.current_scheduler_state = new_state
+        cfg = {
+            "RUNNING":     (GOOD_DIM, GOOD, "RUNNING"),
+            "NOT RUNNING": (BAD_DIM,  BAD,  "STOPPED"),
+        }.get(new_state, (SURFACE_ALT, TEXT_MUTED, "UNKNOWN"))
+        self.scheduler_badge.configure(fg_color=cfg[0], text_color=cfg[1], text=cfg[2])
+        self.scheduler_detail.set(
+            "Scheduler is active and waiting for reminder times."
+            if new_state == "RUNNING" else "Scheduler process is stopped.")
+        self._set_start_stop_button_for_state(new_state)
 
     def _make_card(self, parent) -> ctk.CTkFrame:
         return ctk.CTkFrame(parent, fg_color=SURFACE, corner_radius=6,
