@@ -545,7 +545,7 @@ class SchedulerGui:
 
         win = ctk.CTkToplevel(self.root)
         win.title("Shift Settings  (Ctrl+,)")
-        win.geometry("860x440")
+        win.geometry("860x560")
         win.resizable(False, False)
         win.configure(fg_color=SURFACE)
         self.settings_window = win
@@ -582,15 +582,17 @@ class SchedulerGui:
 
         btn_row = 5
         ghost_btn = dict(border_width=1, border_color=BORDER, font=(FONT_UI, 10, "bold"))
-        for col, (txt, fg, hvr, cmd) in enumerate([
-            ("SAVE",          ACCENT,      ACCENT_HVR,  self.save_shift_hours),
-            ("RESET DEFAULT", SURFACE_ALT, BORDER_LT,   self.reset_settings_to_default),
-            ("CLOSE",         SURFACE_ALT, BORDER_LT,   win.destroy),
-        ]):
-            ctk.CTkButton(c, text=txt, width=130, height=32,
+
+        btn_frame = ctk.CTkFrame(c, fg_color="transparent")
+        btn_frame.grid(row=btn_row, column=0, columnspan=7, pady=(6, 0), sticky="w")
+        for txt, fg, hvr, cmd in [
+            ("SAVE",          ACCENT,      ACCENT_HVR, self.save_shift_hours),
+            ("RESET DEFAULT", SURFACE_ALT, BORDER_LT,  self.reset_settings_to_default),
+            ("CLOSE",         SURFACE_ALT, BORDER_LT,  win.destroy),
+        ]:
+            ctk.CTkButton(btn_frame, text=txt, width=130, height=32,
                           fg_color=fg, hover_color=hvr, text_color=TEXT,
-                          command=cmd, **ghost_btn).grid(
-                row=btn_row, column=col, padx=(0, 10), pady=(6, 0), sticky="w")
+                          command=cmd, **ghost_btn).pack(side=tk.LEFT, padx=(0, 8))
 
         ctk.CTkLabel(c, textvariable=self.shift_preview_var,
                      text_color=TEXT_DIM, font=(FONT_MONO, 9)).grid(
@@ -601,38 +603,44 @@ class SchedulerGui:
 
         ctk.CTkLabel(c, text="AUTO REFRESH", text_color=TEXT_MUTED,
                      font=(FONT_MONO, 9, "bold")).grid(
-            row=btn_row + 3, column=0, columnspan=7, sticky="w", pady=(0, 10))
+            row=btn_row + 3, column=0, columnspan=7, sticky="w", pady=(0, 12))
 
         self.settings_auto_refresh_check = ctk.CTkCheckBox(
-            c, text="Enable", variable=self.auto_refresh_var,
-            text_color=TEXT_MUTED, font=(FONT_UI, 10),
+            c, text="Enable auto refresh", variable=self.auto_refresh_var,
+            text_color=TEXT, font=(FONT_UI, 10),
             command=self._toggle_auto_refresh)
         self.settings_auto_refresh_check.grid(
-            row=btn_row + 4, column=0, padx=(0, 16), sticky="w")
+            row=btn_row + 4, column=0, columnspan=3, padx=(0, 16), pady=(0, 12), sticky="w")
 
         ctk.CTkLabel(c, text="Profile", **lbl_cfg).grid(
-            row=btn_row + 4, column=1, padx=(0, 6), sticky="w")
+            row=btn_row + 5, column=0, padx=(0, 6), pady=(0, 12), sticky="w")
         self.refresh_profile_combo = ctk.CTkComboBox(
             c, values=["Realtime", "Balanced", "Low API Load", "Custom"],
-            width=140, state="readonly",
+            width=160, state="readonly",
             command=lambda _v: self._on_profile_changed())
-        self.refresh_profile_combo.grid(row=btn_row + 4, column=2, padx=(0, 16), sticky="w")
+        self.refresh_profile_combo.grid(row=btn_row + 5, column=1, columnspan=2, padx=(0, 16), pady=(0, 12), sticky="w")
         self.refresh_profile_combo.set(self.refresh_profile_var.get())
 
         ctk.CTkLabel(c, text="Interval", **lbl_cfg).grid(
-            row=btn_row + 4, column=3, padx=(0, 6), sticky="w")
+            row=btn_row + 6, column=0, padx=(0, 6), pady=(0, 12), sticky="w")
         self.refresh_interval_combo = ctk.CTkComboBox(
             c, values=["10", "15", "30", "45", "60", "120", "300", "600"],
-            width=80, command=lambda _v: self._set_profile_custom())
-        self.refresh_interval_combo.grid(row=btn_row + 4, column=4, padx=(0, 8), sticky="w")
+            width=90, command=lambda _v: self._set_profile_custom())
+        self.refresh_interval_combo.grid(row=btn_row + 6, column=1, padx=(0, 8), pady=(0, 12), sticky="w")
         self.refresh_interval_combo.set(self.refresh_interval_var.get())
 
         self.refresh_unit_combo = ctk.CTkComboBox(
             c, values=["Seconds", "Minutes", "Hours"],
-            width=110, state="readonly",
+            width=120, state="readonly",
             command=lambda _v: self._set_profile_custom())
-        self.refresh_unit_combo.grid(row=btn_row + 4, column=5, sticky="w")
+        self.refresh_unit_combo.grid(row=btn_row + 6, column=2, padx=(0, 16), pady=(0, 12), sticky="w")
         self.refresh_unit_combo.set(self.refresh_interval_unit_var.get())
+
+        ctk.CTkButton(c, text="SAVE AUTO REFRESH", width=160, height=32,
+                      fg_color=ACCENT, hover_color=ACCENT_HVR, text_color=TEXT,
+                      font=(FONT_UI, 10, "bold"),
+                      command=self.save_auto_refresh_only).grid(
+            row=btn_row + 7, column=0, padx=(0, 16), pady=(8, 0), sticky="w")
 
         self._load_shift_hours_into_form()
         self._apply_profile_to_interval(set_custom_if_manual=False)
@@ -752,6 +760,27 @@ class SchedulerGui:
         self._refresh_shift_preview()
         self._apply_auto_refresh_info_label()
         self._save_gui_preferences()
+
+    def save_auto_refresh_only(self) -> None:
+        self._sync_refresh_combo_to_vars()
+        self._apply_profile_to_interval(set_custom_if_manual=False)
+        try:
+            interval_seconds = self._interval_seconds_from_fields()
+        except ValueError:
+            messagebox.showerror("Invalid Input", "Refresh interval must be an integer."); return
+        if not (5 <= interval_seconds <= 86400):
+            messagebox.showerror("Invalid Input", "Interval must be between 5s and 24h."); return
+
+        self.auto_refresh_ms = interval_seconds * 1000
+        if (self.refresh_profile_var.get() in self.REFRESH_PROFILES and
+                self.REFRESH_PROFILES[self.refresh_profile_var.get()] != interval_seconds):
+            self.refresh_profile_var.set("Custom")
+            if hasattr(self, "refresh_profile_combo"):
+                self.refresh_profile_combo.set("Custom")
+        self._save_gui_preferences()
+        self._apply_auto_refresh_info_label()
+        self._schedule_next_auto_refresh()
+        messagebox.showinfo("Saved", "Auto refresh settings saved.")
 
     # ── Scheduler state ───────────────────────────────────────────────────────
 
