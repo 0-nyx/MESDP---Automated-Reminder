@@ -31,8 +31,9 @@ WARN_DIM    = "#3d2000"
 BAD         = "#dc2626"
 BAD_DIM     = "#3b0c0c"
 
-FONT_MONO   = "Consolas"
+FONT_MONO   = "Segoe UI"
 FONT_UI     = "Segoe UI"
+FONT_EMOJI  = "Segoe UI Emoji"
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -175,7 +176,7 @@ class SchedulerGui:
 
     def _update_shift_badge(self) -> None:
         shift = self._get_current_shift()
-        label = f"{shift.upper()} SHIFT"
+        label = shift.upper()
         self.shift_badge.configure(text=label, fg_color="#0d2240", text_color=ACCENT)
         self.root.after(60_000, self._update_shift_badge)
 
@@ -264,16 +265,16 @@ class SchedulerGui:
         hinner = ctk.CTkFrame(hcard, fg_color="transparent")
         hinner.pack(padx=20, pady=14)
         ctk.CTkLabel(hinner, text="🎫 CLL MESDP TICKETING WORKLOG",
-                 text_color=TEXT, font=(FONT_MONO, 22, "bold")).pack()
+                 text_color=TEXT, font=(FONT_EMOJI, 22, "bold")).pack()
         ctk.CTkLabel(hinner,
                  text="🧭 Scheduler monitor  ·  🔔 worklog reminder  ·  📸 shift snapshot",
-                     text_color=TEXT_MUTED, font=(FONT_UI, 14)).pack(pady=(4, 0))
+                     text_color=TEXT_MUTED, font=(FONT_EMOJI, 14)).pack(pady=(4, 0))
 
         # Toolbar
         toolbar = ctk.CTkFrame(outer, fg_color="transparent")
         toolbar.pack(fill=tk.X, pady=(0, 14))
 
-        btn_cfg = dict(width=124, height=38, corner_radius=4, font=(FONT_UI, 11, "bold"))
+        btn_cfg = dict(width=124, height=38, corner_radius=4, font=(FONT_EMOJI, 11, "bold"))
         ghost   = dict(fg_color=SURFACE_ALT, hover_color=BORDER_LT, text_color=TEXT,
                        border_width=1, border_color=BORDER)
 
@@ -305,11 +306,11 @@ class SchedulerGui:
 
         self.auto_refresh_info_var = tk.StringVar(value="🔄 Auto Refresh: 30 secs")
         ctk.CTkLabel(meta, textvariable=self.auto_refresh_info_var,
-                 text_color=TEXT_DIM, font=(FONT_MONO, 12)).pack(anchor="e")
+                 text_color=TEXT_DIM, font=(FONT_EMOJI, 12)).pack(anchor="e")
 
         self.auto_refresh_count_var = tk.StringVar(value="⏳ Count: 00:30")
         ctk.CTkLabel(meta, textvariable=self.auto_refresh_count_var,
-                 text_color=TEXT_DIM, font=(FONT_MONO, 12)).pack(anchor="e", pady=(2, 0))
+                 text_color=TEXT_DIM, font=(FONT_EMOJI, 12)).pack(anchor="e", pady=(2, 0))
 
         # Status cards
         cards = ctk.CTkFrame(outer, fg_color="transparent")
@@ -320,11 +321,22 @@ class SchedulerGui:
         sc = self._make_card(cards)
         sc.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         ctk.CTkLabel(sc, text="🧭 SCHEDULER", text_color=TEXT_MUTED,
-                     font=(FONT_MONO, 12, "bold")).pack(anchor="w", padx=16, pady=(14, 6))
-        self.scheduler_badge = self._make_badge(sc, "CHECKING…", SURFACE_ALT, TEXT_MUTED)
-        self.scheduler_badge.pack(anchor="w", padx=16, pady=(0, 4))
-        self.shift_badge = self._make_badge(sc, "DETECTING…", SURFACE_ALT, TEXT_MUTED)
-        self.shift_badge.pack(anchor="w", padx=16, pady=(0, 8))
+                     font=(FONT_EMOJI, 12, "bold")).pack(anchor="w", padx=16, pady=(14, 6))
+
+        status_row = ctk.CTkFrame(sc, fg_color="transparent")
+        status_row.pack(anchor="w", padx=16, pady=(0, 4))
+        ctk.CTkLabel(status_row, text="STATUS:", text_color=TEXT_MUTED,
+                 font=(FONT_UI, 12, "bold")).pack(side=tk.LEFT, padx=(0, 8))
+        self.scheduler_badge = self._make_badge(status_row, "CHECKING…", SURFACE_ALT, TEXT_MUTED)
+        self.scheduler_badge.pack(side=tk.LEFT)
+
+        shift_row = ctk.CTkFrame(sc, fg_color="transparent")
+        shift_row.pack(anchor="w", padx=16, pady=(0, 8))
+        ctk.CTkLabel(shift_row, text="CURRENT SHIFT:", text_color=TEXT_MUTED,
+                 font=(FONT_UI, 12, "bold")).pack(side=tk.LEFT, padx=(0, 8))
+        self.shift_badge = self._make_badge(shift_row, "DETECTING…", SURFACE_ALT, TEXT_MUTED)
+        self.shift_badge.pack(side=tk.LEFT)
+
         self.scheduler_detail = tk.StringVar(value="Reading scheduler monitor…")
         ctk.CTkLabel(sc, textvariable=self.scheduler_detail, text_color=TEXT_MUTED,
                      font=(FONT_UI, 13), justify=tk.LEFT,
@@ -333,11 +345,14 @@ class SchedulerGui:
         snap = self._make_card(cards)
         snap.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
         ctk.CTkLabel(snap, text="📸 PREVIOUS SHIFT SNAPSHOT", text_color=TEXT_MUTED,
-                     font=(FONT_MONO, 12, "bold")).pack(anchor="w", padx=16, pady=(14, 6))
-        self.prev_shift_badge = self._make_badge(snap, "LOADING…", SURFACE_ALT, TEXT_MUTED)
+                     font=(FONT_EMOJI, 12, "bold")).pack(anchor="w", padx=16, pady=(14, 6))
+        self.total_ticket_badge = self._make_badge(snap, "TOTAL TICKET: --", SURFACE_ALT, TEXT_MUTED)
+        self.total_ticket_badge.pack(anchor="w", padx=16, pady=(0, 4))
+        self.updated_today_badge = self._make_badge(snap, "UPDATED TODAY: --", SURFACE_ALT, TEXT_MUTED)
+        self.updated_today_badge.pack(anchor="w", padx=16, pady=(0, 4))
+        self.prev_shift_badge = self._make_badge(snap, "UPDATE PENDING: --", SURFACE_ALT, TEXT_MUTED)
         self.prev_shift_badge.pack(anchor="w", padx=16, pady=(0, 4))
-        self.updated_today_badge = self._make_badge(snap, "UPDATED TODAY…", SURFACE_ALT, TEXT_MUTED)
-        self.updated_today_badge.pack(anchor="w", padx=16, pady=(0, 8))
+        self.prev_shift_badge.pack_configure(pady=(0, 8))
         self.prev_shift_detail = tk.StringVar(value="Pulling ticket data from API…")
         ctk.CTkLabel(snap, textvariable=self.prev_shift_detail, text_color=TEXT_MUTED,
                      font=(FONT_UI, 13), justify=tk.LEFT,
@@ -350,7 +365,7 @@ class SchedulerGui:
         thead = ctk.CTkFrame(tcard, fg_color="transparent")
         thead.pack(fill=tk.X, padx=16, pady=(14, 10))
         ctk.CTkLabel(thead, text="🎫 PENDING TICKETS", text_color=TEXT_MUTED,
-                     font=(FONT_MONO, 12, "bold")).pack(side=tk.LEFT)
+                     font=(FONT_EMOJI, 12, "bold")).pack(side=tk.LEFT)
         ctk.CTkLabel(thead, textvariable=self.table_count_var,
                      text_color=TEXT_DIM, font=(FONT_MONO, 12)).pack(side=tk.RIGHT)
 
@@ -983,7 +998,9 @@ class SchedulerGui:
         self._set_start_stop_button_for_state(self.current_scheduler_state)
 
         if "error" in snapshot:
+            self.total_ticket_badge.configure(text="TOTAL TICKET: --", fg_color=BAD_DIM, text_color=BAD)
             self.prev_shift_badge.configure(text="API ERROR", fg_color=BAD_DIM, text_color=BAD)
+            self.updated_today_badge.configure(text="UPDATED TODAY: --", fg_color=BAD_DIM, text_color=BAD)
             self.prev_shift_detail.set("Unable to load ticket snapshot.")
             self._update_ticket_table([]); return
 
@@ -994,8 +1011,9 @@ class SchedulerGui:
         tickets = snapshot.get("tickets", [])
         clr     = GOOD_DIM if count == 0 else WARN_DIM
         txt_clr = GOOD     if count == 0 else WARN
-        self.prev_shift_badge.configure(text=f"{count} PENDING", fg_color=clr, text_color=txt_clr)
-        self.updated_today_badge.configure(text=f"{updated}/{total} UPDATED TODAY", fg_color=GOOD_DIM, text_color=GOOD)
+        self.total_ticket_badge.configure(text=f"TOTAL TICKET: {total}", fg_color=ACCENT_HVR, text_color=TEXT)
+        self.prev_shift_badge.configure(text=f"UPDATE PENDING: {count}", fg_color=clr, text_color=txt_clr)
+        self.updated_today_badge.configure(text=f"UPDATED TODAY: {updated}", fg_color=GOOD_DIM, text_color=GOOD)
         self.prev_shift_detail.set(
             f"Previous shift: {prev}  ·  Pending carry-over tickets from API snapshot.")
         self._update_ticket_table(tickets)
