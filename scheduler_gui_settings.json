@@ -1,5 +1,7 @@
 {
   "auto_refresh": true,
-  "refresh_interval_seconds": 30,
-  "refresh_profile": "Balanced"
+  "refresh_interval_seconds": 300,
+  "refresh_interval_value": "5",
+  "refresh_interval_unit": "Minutes",
+  "refresh_profile": "Custom"
 }

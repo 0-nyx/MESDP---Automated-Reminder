@@ -4,52 +4,80 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
-from tkinter import messagebox, scrolledtext, ttk
 from datetime import datetime
+from tkinter import messagebox, ttk
+
+import customtkinter as ctk  # pyright: ignore[reportMissingImports]
+
+
+# ── Design Tokens ─────────────────────────────────────────────────────────────
+BG          = "#080d14"
+SURFACE     = "#0d1521"
+SURFACE_ALT = "#111d2e"
+BORDER      = "#1a2840"
+BORDER_LT   = "#223354"
+
+TEXT        = "#c8d8f0"
+TEXT_MUTED  = "#5a7a9e"
+TEXT_DIM    = "#2e4a68"
+
+ACCENT      = "#2f80ed"
+ACCENT_HVR  = "#1a6fd4"
+GOOD        = "#16a34a"
+GOOD_DIM    = "#052e16"
+WARN        = "#d97706"
+WARN_DIM    = "#3d2000"
+BAD         = "#dc2626"
+BAD_DIM     = "#3b0c0c"
+
+FONT_MONO   = "Consolas"
+FONT_UI     = "Segoe UI"
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 class SchedulerGui:
-    REFRESH_PROFILES = {
-        "Realtime": 10,
-        "Balanced": 30,
-        "Low API Load": 120,
-    }
+    REFRESH_PROFILES = {"Realtime": 10, "Balanced": 30, "Low API Load": 120}
+    TITLE_MAX_CHARS  = 64
+    TITLE_MIN_WIDTH  = 260
+    TITLE_MAX_WIDTH  = 520
 
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: ctk.CTk) -> None:
         self.root = root
         self.root.title("MESDP Scheduler Control")
         self.root.geometry("1080x720")
         self.root.minsize(960, 620)
 
-        self.project_root = self._resolve_project_root()
-        self.start_script = os.path.join(self.project_root, "start_scheduler.ps1")
-        self.stop_script = os.path.join(self.project_root, "stop_scheduler.ps1")
-        self.restart_script = os.path.join(self.project_root, "restart_scheduler.ps1")
-        self.monitor_script = os.path.join(self.project_root, "monitor_scheduler.ps1")
-        self.python_exe = os.path.join(self.project_root, ".venv", "Scripts", "python.exe")
+        self.project_root        = self._resolve_project_root()
+        self.start_script        = os.path.join(self.project_root, "start_scheduler.ps1")
+        self.stop_script         = os.path.join(self.project_root, "stop_scheduler.ps1")
+        self.restart_script      = os.path.join(self.project_root, "restart_scheduler.ps1")
+        self.monitor_script      = os.path.join(self.project_root, "monitor_scheduler.ps1")
+        self.python_exe          = os.path.join(self.project_root, ".venv", "Scripts", "python.exe")
         self.shift_settings_file = os.path.join(self.project_root, "shift_settings.json")
-        self.gui_settings_file = os.path.join(self.project_root, "scheduler_gui_settings.json")
+        self.gui_settings_file   = os.path.join(self.project_root, "scheduler_gui_settings.json")
 
-        self.bg = "#0b1220"
-        self.card = "#111a2d"
-        self.card_alt = "#0f1a30"
-        self.text_main = "#e5edf8"
-        self.text_muted = "#9cb0cd"
-        self.accent = "#38bdf8"
-        self.good = "#22c55e"
-        self.warn = "#f59e0b"
-        self.bad = "#ef4444"
-        self.auto_refresh_ms = 30000
-        self.auto_refresh_job = None
-        self.current_scheduler_state = "UNKNOWN"
-        self.settings_window = None
+        self.auto_refresh_ms             = 30000
+        self.auto_refresh_job            = None
+        self.current_scheduler_state     = "UNKNOWN"
+        self.settings_window             = None
+        self.latest_tickets: list[dict]  = []
+        self._table_resize_job: str | None        = None
+        self._title_tooltip: ctk.CTkToplevel | None        = None
+        self._title_tooltip_label: ctk.CTkLabel | None     = None
+        self._title_hover_item: str | None        = None
+        self._full_title_by_item: dict[str, str]  = {}
+
+        self.status_filter_var    = tk.StringVar(value="All")
+        self.severity_filter_var  = tk.StringVar(value="All")
+        self.table_count_var      = tk.StringVar(value="Showing 0 of 0")
+
         self.shift_hour_vars: dict[str, tuple[tk.StringVar, tk.StringVar]] = {}
         self.shift_reminder_vars: dict[str, tk.StringVar] = {}
-        self.shift_preview_var = tk.StringVar(value="Reminder preview: -")
-        self.auto_refresh_var = tk.BooleanVar(value=True)
-        self.refresh_interval_var = tk.StringVar(value="30")
+        self.shift_preview_var         = tk.StringVar(value="Reminder preview: —")
+        self.auto_refresh_var          = tk.BooleanVar(value=True)
+        self.refresh_interval_var      = tk.StringVar(value="30")
         self.refresh_interval_unit_var = tk.StringVar(value="Seconds")
-        self.refresh_profile_var = tk.StringVar(value="Balanced")
+        self.refresh_profile_var       = tk.StringVar(value="Balanced")
 
         self._load_gui_preferences()
         self._configure_styles()
@@ -57,21 +85,19 @@ class SchedulerGui:
         self.root.bind_all("<Control-comma>", lambda _e: self.open_shift_settings_window())
         self.refresh_status()
 
+    # ── Persistence ───────────────────────────────────────────────────────────
+
     def _load_gui_preferences(self) -> None:
         if not os.path.exists(self.gui_settings_file):
             return
         try:
             with open(self.gui_settings_file, "r", encoding="utf-8") as f:
-                payload = json.load(f)
-            auto_refresh = bool(payload.get("auto_refresh", True))
-            interval_seconds = int(payload.get("refresh_interval_seconds", 30))
-            interval_value = str(payload.get("refresh_interval_value", ""))
-            interval_unit = str(payload.get("refresh_interval_unit", ""))
-            refresh_profile = str(payload.get("refresh_profile", "Balanced"))
-            if interval_seconds < 5:
-                interval_seconds = 5
-            if interval_seconds > 86400:
-                interval_seconds = 86400
+                p = json.load(f)
+            auto_refresh     = bool(p.get("auto_refresh", True))
+            interval_seconds = max(5, min(86400, int(p.get("refresh_interval_seconds", 30))))
+            interval_value   = str(p.get("refresh_interval_value", ""))
+            interval_unit    = str(p.get("refresh_interval_unit", ""))
+            refresh_profile  = str(p.get("refresh_profile", "Balanced"))
             self.auto_refresh_var.set(auto_refresh)
             if interval_value and interval_unit in {"Seconds", "Minutes", "Hours"}:
                 self.refresh_interval_var.set(interval_value)
@@ -86,11 +112,11 @@ class SchedulerGui:
 
     def _save_gui_preferences(self) -> None:
         payload = {
-            "auto_refresh": bool(self.auto_refresh_var.get()),
+            "auto_refresh":             bool(self.auto_refresh_var.get()),
             "refresh_interval_seconds": int(self.auto_refresh_ms / 1000),
-            "refresh_interval_value": self.refresh_interval_var.get(),
-            "refresh_interval_unit": self.refresh_interval_unit_var.get(),
-            "refresh_profile": self.refresh_profile_var.get(),
+            "refresh_interval_value":   self.refresh_interval_var.get(),
+            "refresh_interval_unit":    self.refresh_interval_unit_var.get(),
+            "refresh_profile":          self.refresh_profile_var.get(),
         }
         try:
             with open(self.gui_settings_file, "w", encoding="utf-8") as f:
@@ -98,307 +124,362 @@ class SchedulerGui:
         except OSError:
             pass
 
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
     def _resolve_project_root(self) -> str:
-        """Find the folder that contains scheduler control scripts."""
-        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
-        file_dir = os.path.dirname(os.path.abspath(__file__))
-        cwd = os.getcwd()
-
         candidates = [
-            file_dir,
-            exe_dir,
-            os.path.dirname(exe_dir),
-            os.path.dirname(os.path.dirname(exe_dir)),
-            cwd,
+            os.path.dirname(os.path.abspath(__file__)),
+            os.path.dirname(os.path.abspath(sys.executable)),
+            os.path.dirname(os.path.dirname(os.path.abspath(sys.executable))),
+            os.getcwd(),
         ]
-
         required = ("start_scheduler.ps1", "stop_scheduler.ps1", "monitor_scheduler.ps1")
         for base in candidates:
-            if all(os.path.exists(os.path.join(base, name)) for name in required):
+            if all(os.path.exists(os.path.join(base, n)) for n in required):
                 return base
+        return candidates[0]
 
-        return file_dir
+    def _make_card(self, parent) -> ctk.CTkFrame:
+        return ctk.CTkFrame(parent, fg_color=SURFACE, corner_radius=6,
+                             border_width=1, border_color=BORDER)
+
+    def _make_badge(self, parent, text: str, fg: str, txt: str = TEXT) -> ctk.CTkLabel:
+        return ctk.CTkLabel(parent, text=text, fg_color=fg, text_color=txt,
+                             font=(FONT_MONO, 10, "bold"), corner_radius=4,
+                             padx=10, pady=4)
+
+    # ── Styles ────────────────────────────────────────────────────────────────
 
     def _configure_styles(self) -> None:
-        self.root.configure(bg=self.bg)
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("blue")
+        self.root.configure(fg_color=BG)
+
         style = ttk.Style()
         style.theme_use("clam")
-        style.configure(
-            "Tickets.Treeview",
-            background=self.card,
-            foreground=self.text_main,
-            fieldbackground=self.card,
-            bordercolor=self.card,
-            rowheight=30,
-            font=("Segoe UI", 10),
-        )
-        style.configure(
-            "Tickets.Treeview.Heading",
-            background="#1f2a44",
-            foreground="#dbe7fb",
-            bordercolor="#1f2a44",
-            font=("Segoe UI", 10, "bold"),
-            relief="flat",
-        )
-        style.map(
-            "Tickets.Treeview",
-            background=[("selected", "#213453")],
-            foreground=[("selected", "#ffffff")],
-        )
+        style.configure("Tickets.Treeview",
+            background=SURFACE, foreground=TEXT,
+            fieldbackground=SURFACE, bordercolor=SURFACE,
+            rowheight=32, font=(FONT_UI, 10))
+        style.configure("Tickets.Treeview.Heading",
+            background=SURFACE_ALT, foreground=TEXT_MUTED,
+            bordercolor=BORDER, font=(FONT_UI, 9, "bold"),
+            relief="flat", padding=(8, 6))
+        style.map("Tickets.Treeview",
+            background=[("selected", "#162540")],
+            foreground=[("selected", TEXT)])
+
+    # ── UI Build ──────────────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        outer = tk.Frame(self.root, bg=self.bg)
-        outer.pack(fill=tk.BOTH, expand=True, padx=16, pady=16)
+        outer = ctk.CTkFrame(self.root, fg_color=BG)
+        outer.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
 
-        header = tk.Frame(outer, bg=self.card_alt, highlightthickness=1, highlightbackground="#1f2a44")
-        header.pack(fill=tk.X)
-        tk.Label(
-            header,
-            text="MESDP Control Launcher",
-            bg=self.card_alt,
-            fg=self.text_main,
-            font=("Segoe UI", 20, "bold"),
-            pady=12,
-        ).pack()
-        tk.Label(
-            header,
-            text="Start, stop, restart scheduler and monitor previous-shift ticket status in one dashboard",
-            bg=self.card_alt,
-            fg=self.text_muted,
-            font=("Segoe UI", 10),
-            pady=0,
-        ).pack(pady=(0, 12))
+        # Header
+        hcard = self._make_card(outer)
+        hcard.pack(fill=tk.X, pady=(0, 14))
+        hinner = ctk.CTkFrame(hcard, fg_color="transparent")
+        hinner.pack(padx=20, pady=14)
+        ctk.CTkLabel(hinner, text="MESDP CONTROL",
+                     text_color=TEXT, font=(FONT_MONO, 18, "bold")).pack()
+        ctk.CTkLabel(hinner,
+                     text="Scheduler monitor  ·  worklog reminder  ·  shift snapshot",
+                     text_color=TEXT_MUTED, font=(FONT_UI, 10)).pack(pady=(2, 0))
 
-        controls = tk.Frame(outer, bg=self.bg)
-        controls.pack(fill=tk.X, pady=(14, 10))
+        # Toolbar
+        toolbar = ctk.CTkFrame(outer, fg_color="transparent")
+        toolbar.pack(fill=tk.X, pady=(0, 14))
 
-        self.start_stop_btn = tk.Button(
-            controls,
-            text="START",
-            width=14,
-            bg="#0f5132",
-            fg="#ffffff",
-            activebackground="#146c43",
-            relief=tk.FLAT,
-            command=self.toggle_scheduler,
-        )
-        self.restart_btn = tk.Button(
-            controls,
-            text="RESTART",
-            width=14,
-            bg="#7c2d12",
-            fg="#ffffff",
-            activebackground="#9a3412",
-            relief=tk.FLAT,
-            command=self.restart_scheduler,
-        )
-        self.refresh_btn = tk.Button(
-            controls,
-            text="REFRESH",
-            width=14,
-            bg="#0f4c81",
-            fg="#ffffff",
-            activebackground="#145ea8",
-            relief=tk.FLAT,
-            command=self.refresh_status,
-        )
-        self.settings_btn = tk.Button(
-            controls,
-            text="SETTINGS ⚙",
-            width=16,
-            bg="#1f2a44",
-            fg="#ffffff",
-            activebackground="#2c3c60",
-            relief=tk.FLAT,
-            command=self.open_shift_settings_window,
-        )
+        btn_cfg = dict(width=110, height=34, corner_radius=4, font=(FONT_UI, 10, "bold"))
+        ghost   = dict(fg_color=SURFACE_ALT, hover_color=BORDER_LT, text_color=TEXT,
+                       border_width=1, border_color=BORDER)
 
-        self.start_stop_btn.grid(row=0, column=0, padx=(0, 8))
-        self.restart_btn.grid(row=0, column=1, padx=8)
-        self.refresh_btn.grid(row=0, column=2, padx=8)
-        self.settings_btn.grid(row=0, column=3, padx=8)
+        self.start_stop_btn = ctk.CTkButton(
+            toolbar, text="START",
+            fg_color=GOOD_DIM, hover_color="#073a1a", text_color=GOOD,
+            border_width=1, border_color=GOOD,
+            command=self.toggle_scheduler, **btn_cfg)
+        self.restart_btn = ctk.CTkButton(
+            toolbar, text="RESTART", command=self.restart_scheduler, **btn_cfg, **ghost)
+        self.refresh_btn = ctk.CTkButton(
+            toolbar, text="REFRESH", command=self.refresh_status, **btn_cfg, **ghost)
+        self.settings_btn = ctk.CTkButton(
+            toolbar, text="SETTINGS  ⚙", text_color=TEXT_MUTED,
+            fg_color=SURFACE_ALT, hover_color=BORDER_LT,
+            border_width=1, border_color=BORDER,
+            command=self.open_shift_settings_window, **btn_cfg)
 
-        controls.columnconfigure(4, weight=1)
-        self.auto_refresh_info_var = tk.StringVar(value="Auto refresh: ON (30s)")
-        tk.Label(
-            controls,
-            textvariable=self.auto_refresh_info_var,
-            bg=self.bg,
-            fg=self.text_muted,
-            font=("Segoe UI", 9, "bold"),
-        ).grid(row=0, column=6, padx=(12, 0), sticky="e")
+        for i, btn in enumerate([self.start_stop_btn, self.restart_btn,
+                                   self.refresh_btn, self.settings_btn]):
+            btn.grid(row=0, column=i, padx=(0, 8))
 
-        self.last_updated_var = tk.StringVar(value="Last updated: -")
-        tk.Label(
-            controls,
-            textvariable=self.last_updated_var,
-            bg=self.bg,
-            fg=self.text_muted,
-            font=("Segoe UI", 9),
-        ).grid(row=0, column=7, padx=(10, 0), sticky="e")
+        toolbar.columnconfigure(4, weight=1)
+        meta = ctk.CTkFrame(toolbar, fg_color="transparent")
+        meta.grid(row=0, column=5, sticky="e")
 
-        cards = tk.Frame(outer, bg=self.bg)
-        cards.pack(fill=tk.X, pady=(8, 12))
+        self.last_updated_var = tk.StringVar(value="—")
+        ctk.CTkLabel(meta, textvariable=self.last_updated_var,
+                     text_color=TEXT_DIM, font=(FONT_MONO, 9)).pack(side=tk.RIGHT, padx=(0, 16))
+
+        self.auto_refresh_info_var = tk.StringVar(value="↻  30s  ·  Balanced")
+        ctk.CTkLabel(meta, textvariable=self.auto_refresh_info_var,
+                     text_color=TEXT_DIM, font=(FONT_MONO, 9)).pack(side=tk.RIGHT)
+
+        # Status cards
+        cards = ctk.CTkFrame(outer, fg_color="transparent")
+        cards.pack(fill=tk.X, pady=(0, 14))
         cards.columnconfigure(0, weight=1)
         cards.columnconfigure(1, weight=1)
 
-        sched_card = tk.Frame(cards, bg=self.card, highlightthickness=1, highlightbackground="#1f2a44")
-        sched_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        tk.Label(sched_card, text="SCHEDULER STATUS", bg=self.card, fg=self.text_muted, font=("Segoe UI", 10, "bold")).pack(
-            anchor="w", padx=12, pady=(12, 4)
-        )
-        self.scheduler_badge = tk.Label(
-            sched_card,
-            text="CHECKING...",
-            bg="#1f2937",
-            fg="#ffffff",
-            padx=10,
-            pady=5,
-            font=("Segoe UI", 10, "bold"),
-        )
-        self.scheduler_badge.pack(anchor="w", padx=12, pady=(0, 8))
-        self.scheduler_detail = tk.StringVar(value="Reading scheduler monitor output...")
-        tk.Label(
-            sched_card,
-            textvariable=self.scheduler_detail,
-            bg=self.card,
-            fg=self.text_main,
-            justify=tk.LEFT,
-            wraplength=430,
-            font=("Segoe UI", 10),
-        ).pack(anchor="w", padx=12, pady=(0, 12))
+        sc = self._make_card(cards)
+        sc.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        ctk.CTkLabel(sc, text="SCHEDULER", text_color=TEXT_MUTED,
+                     font=(FONT_MONO, 9, "bold")).pack(anchor="w", padx=16, pady=(14, 6))
+        self.scheduler_badge = self._make_badge(sc, "CHECKING…", SURFACE_ALT, TEXT_MUTED)
+        self.scheduler_badge.pack(anchor="w", padx=16, pady=(0, 8))
+        self.scheduler_detail = tk.StringVar(value="Reading scheduler monitor…")
+        ctk.CTkLabel(sc, textvariable=self.scheduler_detail, text_color=TEXT_MUTED,
+                     font=(FONT_UI, 10), justify=tk.LEFT,
+                     wraplength=430).pack(anchor="w", padx=16, pady=(0, 14))
 
-        shift_card = tk.Frame(cards, bg=self.card, highlightthickness=1, highlightbackground="#1f2a44")
-        shift_card.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-        tk.Label(
-            shift_card,
-            text="PREVIOUS SHIFT TICKET SNAPSHOT",
-            bg=self.card,
-            fg=self.text_muted,
-            font=("Segoe UI", 10, "bold"),
-        ).pack(anchor="w", padx=12, pady=(12, 4))
-        self.prev_shift_badge = tk.Label(
-            shift_card,
-            text="LOADING...",
-            bg="#1f2937",
-            fg="#ffffff",
-            padx=10,
-            pady=5,
-            font=("Segoe UI", 10, "bold"),
-        )
-        self.prev_shift_badge.pack(anchor="w", padx=12, pady=(0, 8))
-        self.prev_shift_detail = tk.StringVar(value="Pulling pending ticket status from API...")
-        tk.Label(
-            shift_card,
-            textvariable=self.prev_shift_detail,
-            bg=self.card,
-            fg=self.text_main,
-            justify=tk.LEFT,
-            wraplength=430,
-            font=("Segoe UI", 10),
-        ).pack(anchor="w", padx=12, pady=(0, 12))
+        snap = self._make_card(cards)
+        snap.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
+        ctk.CTkLabel(snap, text="PREVIOUS SHIFT SNAPSHOT", text_color=TEXT_MUTED,
+                     font=(FONT_MONO, 9, "bold")).pack(anchor="w", padx=16, pady=(14, 6))
+        self.prev_shift_badge = self._make_badge(snap, "LOADING…", SURFACE_ALT, TEXT_MUTED)
+        self.prev_shift_badge.pack(anchor="w", padx=16, pady=(0, 8))
+        self.prev_shift_detail = tk.StringVar(value="Pulling ticket data from API…")
+        ctk.CTkLabel(snap, textvariable=self.prev_shift_detail, text_color=TEXT_MUTED,
+                     font=(FONT_UI, 10), justify=tk.LEFT,
+                     wraplength=430).pack(anchor="w", padx=16, pady=(0, 14))
 
-        table_card = tk.Frame(outer, bg=self.card, highlightthickness=1, highlightbackground="#1f2a44")
-        table_card.pack(fill=tk.BOTH, expand=True)
-        tk.Label(
-            table_card,
-            text="PENDING TICKETS (PREVIOUS SHIFT REFERENCE)",
-            bg=self.card,
-            fg=self.text_muted,
-            font=("Segoe UI", 10, "bold"),
-        ).pack(anchor="w", padx=12, pady=(12, 6))
+        # Ticket table
+        tcard = self._make_card(outer)
+        tcard.pack(fill=tk.BOTH, expand=True, pady=(0, 14))
 
-        columns = ("ticket_id", "title", "assigned_l1", "severity", "status", "last_worklog")
-        self.ticket_table = ttk.Treeview(table_card, columns=columns, show="headings", style="Tickets.Treeview")
-        headers = {
-            "ticket_id": "Ticket ID",
-            "title": "Title",
-            "assigned_l1": "Assigned L1",
-            "severity": "Severity",
-            "status": "Status",
-            "last_worklog": "Last Worklog",
-        }
-        widths = {
-            "ticket_id": 90,
-            "title": 360,
-            "assigned_l1": 130,
-            "severity": 100,
-            "status": 130,
-            "last_worklog": 140,
-        }
-        for col in columns:
+        thead = ctk.CTkFrame(tcard, fg_color="transparent")
+        thead.pack(fill=tk.X, padx=16, pady=(14, 10))
+        ctk.CTkLabel(thead, text="PENDING TICKETS", text_color=TEXT_MUTED,
+                     font=(FONT_MONO, 9, "bold")).pack(side=tk.LEFT)
+        ctk.CTkLabel(thead, textvariable=self.table_count_var,
+                     text_color=TEXT_DIM, font=(FONT_MONO, 9)).pack(side=tk.RIGHT)
+
+        fbar = ctk.CTkFrame(tcard, fg_color="transparent")
+        fbar.pack(fill=tk.X, padx=16, pady=(0, 10))
+        combo_cfg = dict(width=130, height=30, font=(FONT_UI, 10))
+
+        ctk.CTkLabel(fbar, text="Status", text_color=TEXT_MUTED,
+                     font=(FONT_UI, 9)).pack(side=tk.LEFT)
+        self.status_filter_combo = ctk.CTkComboBox(
+            fbar, values=["All"], variable=self.status_filter_var,
+            state="readonly", command=lambda _v: self._on_filter_changed(), **combo_cfg)
+        self.status_filter_combo.pack(side=tk.LEFT, padx=(6, 16))
+        self.status_filter_combo.set("All")
+
+        ctk.CTkLabel(fbar, text="Severity", text_color=TEXT_MUTED,
+                     font=(FONT_UI, 9)).pack(side=tk.LEFT)
+        self.severity_filter_combo = ctk.CTkComboBox(
+            fbar, values=["All"], variable=self.severity_filter_var,
+            state="readonly", command=lambda _v: self._on_filter_changed(), **combo_cfg)
+        self.severity_filter_combo.pack(side=tk.LEFT, padx=(6, 16))
+        self.severity_filter_combo.set("All")
+
+        ctk.CTkButton(fbar, text="Clear", width=70, height=30,
+                      fg_color=SURFACE_ALT, hover_color=BORDER_LT,
+                      text_color=TEXT_MUTED, border_width=1, border_color=BORDER,
+                      font=(FONT_UI, 9), command=self._clear_filters).pack(side=tk.LEFT)
+
+        self.table_wrap = ctk.CTkFrame(tcard, fg_color="transparent")
+        self.table_wrap.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 14))
+
+        cols    = ("ticket_id", "title", "assigned_l1", "severity", "status", "last_worklog")
+        headers = {"ticket_id": "Ticket ID", "title": "Title", "assigned_l1": "Assigned L1",
+                   "severity": "Severity", "status": "Status", "last_worklog": "Last Worklog"}
+        widths  = {"ticket_id": 90, "title": 360, "assigned_l1": 130,
+                   "severity": 100, "status": 130, "last_worklog": 140}
+        self.ticket_column_widths = widths
+
+        self.ticket_table = ttk.Treeview(
+            self.table_wrap, columns=cols, show="headings", style="Tickets.Treeview")
+        for col in cols:
             self.ticket_table.heading(col, text=headers[col])
-            self.ticket_table.column(col, width=widths[col], anchor=tk.CENTER)
+            anchor = tk.W if col == "title" else tk.CENTER
+            self.ticket_table.column(col, width=widths[col], minwidth=widths[col],
+                                      stretch=False, anchor=anchor)
 
-        table_scroll = ttk.Scrollbar(table_card, orient=tk.VERTICAL, command=self.ticket_table.yview)
-        self.ticket_table.configure(yscrollcommand=table_scroll.set)
+        sy = ttk.Scrollbar(self.table_wrap, orient=tk.VERTICAL, command=self.ticket_table.yview)
+        sx = ttk.Scrollbar(self.table_wrap, orient=tk.HORIZONTAL, command=self.ticket_table.xview)
+        self.ticket_table.configure(yscrollcommand=sy.set, xscrollcommand=sx.set)
+        self.ticket_table.grid(row=0, column=0, sticky="nsew")
+        sy.grid(row=0, column=1, sticky="ns", padx=(6, 0))
+        sx.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        self.table_wrap.grid_rowconfigure(0, weight=1)
+        self.table_wrap.grid_columnconfigure(0, weight=1)
+        self.ticket_table.bind("<Configure>", self._on_ticket_table_configure)
+        self.ticket_table.bind("<Motion>",    self._on_ticket_table_hover)
+        self.ticket_table.bind("<Leave>",     self._hide_title_tooltip)
 
-        self.ticket_table.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(12, 0), pady=(0, 12))
-        table_scroll.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 12), pady=(0, 12))
-
-        log_card = tk.Frame(outer, bg=self.card, highlightthickness=1, highlightbackground="#1f2a44")
-        log_card.pack(fill=tk.BOTH, expand=True, pady=(12, 0))
-        tk.Label(log_card, text="MONITOR OUTPUT", bg=self.card, fg=self.text_muted, font=("Segoe UI", 10, "bold")).pack(
-            anchor="w", padx=12, pady=(12, 6)
-        )
-        self.output = scrolledtext.ScrolledText(
-            log_card,
-            wrap=tk.WORD,
-            font=("Consolas", 10),
-            height=8,
-            bg="#0b1324",
-            fg="#cbd8ee",
-            insertbackground="#cbd8ee",
-            relief=tk.FLAT,
-            borderwidth=0,
-        )
-        self.output.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+        # Log
+        lcard = self._make_card(outer)
+        lcard.pack(fill=tk.BOTH, expand=True)
+        ctk.CTkLabel(lcard, text="MONITOR OUTPUT", text_color=TEXT_MUTED,
+                     font=(FONT_MONO, 9, "bold")).pack(anchor="w", padx=16, pady=(14, 6))
+        self.output = ctk.CTkTextbox(lcard, font=(FONT_MONO, 10), height=90,
+                                      fg_color=BG, text_color="#4a7098",
+                                      border_width=0, corner_radius=0)
+        self.output.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 14))
         self.output.configure(state=tk.DISABLED)
+
+    # ── Table ─────────────────────────────────────────────────────────────────
+
+    def _on_ticket_table_configure(self, _event=None) -> None:
+        if self._table_resize_job:
+            self.root.after_cancel(self._table_resize_job)
+        self._table_resize_job = self.root.after(120, self._apply_ticket_table_layout)
+
+    def _apply_ticket_table_layout(self) -> None:
+        self._table_resize_job = None
+        self._resize_title_column()
+        if self.latest_tickets:
+            self._render_filtered_ticket_rows()
+
+    def _resize_title_column(self) -> None:
+        avail = self.table_wrap.winfo_width()
+        if avail <= 1:
+            return
+        fixed  = sum(self.ticket_column_widths[c] for c in
+                     ("ticket_id", "assigned_l1", "severity", "status", "last_worklog"))
+        target = max(self.TITLE_MIN_WIDTH, min(self.TITLE_MAX_WIDTH, avail - fixed - 32))
+        self.ticket_table.column("title", width=target,
+                                  minwidth=self.TITLE_MIN_WIDTH, stretch=False)
+
+    def _truncate_title_for_current_width(self, text: str) -> str:
+        px     = int(self.ticket_table.column("title", "width"))
+        max_ch = min(self.TITLE_MAX_CHARS, max(20, int((px - 20) / 7)))
+        return text if len(text) <= max_ch else text[:max_ch - 3].rstrip() + "…"
+
+    def _show_title_tooltip(self, full_title: str, x: int, y: int) -> None:
+        if self._title_tooltip is None or not self._title_tooltip.winfo_exists():
+            tip = ctk.CTkToplevel(self.root)
+            tip.overrideredirect(True)
+            tip.attributes("-topmost", True)
+            tip.configure(fg_color=SURFACE_ALT)
+            lbl = ctk.CTkLabel(tip, text=full_title, text_color=TEXT,
+                                fg_color=SURFACE_ALT, justify=tk.LEFT,
+                                wraplength=520, padx=12, pady=8, font=(FONT_UI, 10))
+            lbl.pack()
+            self._title_tooltip       = tip
+            self._title_tooltip_label = lbl
+        if self._title_tooltip_label:
+            self._title_tooltip_label.configure(text=full_title)
+        self._title_tooltip.geometry(f"+{x + 14}+{y + 18}")
+        self._title_tooltip.deiconify()
+
+    def _hide_title_tooltip(self, _event=None) -> None:
+        self._title_hover_item = None
+        if self._title_tooltip and self._title_tooltip.winfo_exists():
+            self._title_tooltip.withdraw()
+
+    def _on_ticket_table_hover(self, event) -> None:
+        row_id = self.ticket_table.identify_row(event.y)
+        col_id = self.ticket_table.identify_column(event.x)
+        if not row_id or col_id != "#2":
+            self._hide_title_tooltip(); return
+        full = self._full_title_by_item.get(row_id, "")
+        if not full:
+            self._hide_title_tooltip(); return
+        vals = self.ticket_table.item(row_id, "values")
+        if len(vals) > 1 and vals[1] == full:
+            self._hide_title_tooltip(); return
+        if self._title_hover_item != row_id:
+            self._title_hover_item = row_id
+            self._show_title_tooltip(full, event.x_root, event.y_root)
+        elif self._title_tooltip and self._title_tooltip.winfo_exists():
+            self._title_tooltip.geometry(f"+{event.x_root + 14}+{event.y_root + 18}")
+
+    def _refresh_filter_options(self, tickets: list[dict]) -> None:
+        statuses   = sorted({str(t.get("status",   "")).strip() for t in tickets if t.get("status")})
+        severities = sorted({str(t.get("severity", "")).strip() for t in tickets if t.get("severity")})
+        self.status_filter_combo.configure(values=["All", *statuses])
+        self.severity_filter_combo.configure(values=["All", *severities])
+        if self.status_filter_var.get() not in ["All", *statuses]:
+            self.status_filter_var.set("All"); self.status_filter_combo.set("All")
+        if self.severity_filter_var.get() not in ["All", *severities]:
+            self.severity_filter_var.set("All"); self.severity_filter_combo.set("All")
+
+    def _get_filtered_tickets(self) -> list[dict]:
+        sel_s, sel_v = self.status_filter_var.get().strip(), self.severity_filter_var.get().strip()
+        out = self.latest_tickets
+        if sel_s and sel_s != "All":
+            out = [t for t in out if str(t.get("status",   "")).strip() == sel_s]
+        if sel_v and sel_v != "All":
+            out = [t for t in out if str(t.get("severity", "")).strip() == sel_v]
+        return out
+
+    def _on_filter_changed(self) -> None:
+        self._render_filtered_ticket_rows()
+
+    def _clear_filters(self) -> None:
+        self.status_filter_var.set("All");   self.status_filter_combo.set("All")
+        self.severity_filter_var.set("All"); self.severity_filter_combo.set("All")
+        self._render_filtered_ticket_rows()
+
+    def _render_filtered_ticket_rows(self) -> None:
+        filtered = self._get_filtered_tickets()
+        self._render_ticket_rows(filtered)
+        self.table_count_var.set(f"Showing {len(filtered)} of {len(self.latest_tickets)}")
+
+    def _render_ticket_rows(self, tickets: list[dict]) -> None:
+        self._hide_title_tooltip()
+        self._full_title_by_item.clear()
+        for row in self.ticket_table.get_children():
+            self.ticket_table.delete(row)
+        for item in tickets:
+            raw   = str(item.get("title", "N/A"))
+            short = self._truncate_title_for_current_width(raw)
+            rid   = self.ticket_table.insert("", tk.END, values=(
+                item.get("ticket_id",    "N/A"),
+                short,
+                item.get("assigned_l1",  "N/A"),
+                item.get("severity",     "N/A"),
+                item.get("status",       "N/A"),
+                item.get("last_worklog", "N/A"),
+            ))
+            self._full_title_by_item[rid] = raw
+
+    # ── PowerShell / Python runners ───────────────────────────────────────────
 
     def _run_ps(self, script_path: str) -> tuple[int, str]:
         if not os.path.exists(script_path):
             return 1, f"Script not found: {script_path}"
-
-        cmd = [
-            "powershell.exe",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            script_path,
-        ]
-
-        proc = subprocess.run(
-            cmd,
-            cwd=self.project_root,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-
-        combined = (proc.stdout or "")
-        if proc.stderr:
-            combined += "\n" + proc.stderr
-        return proc.returncode, combined.strip()
+        cmd = ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script_path]
+        kw: dict = {"cwd": self.project_root, "capture_output": True,
+                    "text": True, "encoding": "utf-8", "errors": "replace"}
+        if os.name == "nt":
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 0
+            kw["startupinfo"] = si
+            kw["creationflags"] = subprocess.CREATE_NO_WINDOW
+        p = subprocess.run(cmd, **kw)
+        return p.returncode, ((p.stdout or "") + ("\n" + p.stderr if p.stderr else "")).strip()
 
     def _run_python_inline(self, code_text: str) -> tuple[int, str]:
         if not os.path.exists(self.python_exe):
-            return 1, f"Python executable not found: {self.python_exe}"
-
+            return 1, f"Python not found: {self.python_exe}"
         cmd = [self.python_exe, "-X", "utf8", "-c", code_text]
-        proc = subprocess.run(
-            cmd,
-            cwd=self.project_root,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-        combined = (proc.stdout or "")
-        if proc.stderr:
-            combined += "\n" + proc.stderr
-        return proc.returncode, combined.strip()
+        kw: dict = {"cwd": self.project_root, "capture_output": True,
+                    "text": True, "encoding": "utf-8", "errors": "replace"}
+        if os.name == "nt":
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 0
+            kw["startupinfo"] = si
+            kw["creationflags"] = subprocess.CREATE_NO_WINDOW
+        p = subprocess.run(cmd, **kw)
+        return p.returncode, ((p.stdout or "") + ("\n" + p.stderr if p.stderr else "")).strip()
+
+    # ── Interval helpers ──────────────────────────────────────────────────────
 
     def _set_interval_fields_from_seconds(self, seconds: int) -> None:
         if seconds % 3600 == 0:
@@ -411,267 +492,147 @@ class SchedulerGui:
             self.refresh_interval_var.set(str(seconds))
             self.refresh_interval_unit_var.set("Seconds")
 
+    def _sync_refresh_combo_to_vars(self) -> None:
+        if hasattr(self, "refresh_interval_combo"):
+            self.refresh_interval_var.set(self.refresh_interval_combo.get().strip())
+        if hasattr(self, "refresh_unit_combo"):
+            self.refresh_interval_unit_var.set(self.refresh_unit_combo.get().strip())
+        if hasattr(self, "refresh_profile_combo"):
+            self.refresh_profile_var.set(self.refresh_profile_combo.get().strip())
+
     def _interval_seconds_from_fields(self) -> int:
-        raw = self.refresh_interval_var.get().strip()
+        self._sync_refresh_combo_to_vars()
         unit = self.refresh_interval_unit_var.get().strip()
-        value = int(raw)
-        if unit == "Hours":
-            return value * 3600
-        if unit == "Minutes":
-            return value * 60
-        return value
+        val  = int(self.refresh_interval_var.get().strip())
+        return val * (3600 if unit == "Hours" else 60 if unit == "Minutes" else 1)
+
+    # ── Settings window ───────────────────────────────────────────────────────
 
     def _load_shift_hours_into_form(self) -> None:
         if not self.shift_hour_vars:
             return
-
         code = (
             "import json, sys\n"
             f"sys.path.insert(0, {self.project_root!r})\n"
             "import worklog_reminder as wr\n"
-            "out={'times': wr.SHIFT_TIMES, 'reminders': wr.SHIFT_REMINDER_TIMES, 'offsets': wr.SHIFT_REMINDER_OFFSETS}\n"
+            "out={'times':wr.SHIFT_TIMES,'reminders':wr.SHIFT_REMINDER_TIMES,'offsets':wr.SHIFT_REMINDER_OFFSETS}\n"
             "print(json.dumps(out))\n"
         )
         rc, out = self._run_python_inline(code)
         if rc != 0:
             return
-
         parsed = None
         for line in reversed(out.splitlines()):
             try:
-                parsed = json.loads(line)
-                break
+                parsed = json.loads(line); break
             except json.JSONDecodeError:
                 continue
         if not isinstance(parsed, dict):
             return
-
-        times = parsed.get("times", {})
+        times   = parsed.get("times", {})
         offsets = parsed.get("offsets", {})
-        for shift_name, vars_pair in self.shift_hour_vars.items():
-            start_var, end_var = vars_pair
-            val = times.get(shift_name, ["00:00", "00:00"])
+        for sn, (sv, ev) in self.shift_hour_vars.items():
+            val = times.get(sn, ["00:00", "00:00"])
             if isinstance(val, (list, tuple)) and len(val) == 2:
-                start_var.set(str(val[0]))
-                end_var.set(str(val[1]))
-            if shift_name in self.shift_reminder_vars:
-                self.shift_reminder_vars[shift_name].set(str(offsets.get(shift_name, 30)))
-
+                sv.set(str(val[0])); ev.set(str(val[1]))
+            if sn in self.shift_reminder_vars:
+                self.shift_reminder_vars[sn].set(str(offsets.get(sn, 30)))
         self._refresh_shift_preview(parsed.get("reminders", {}))
 
     def open_shift_settings_window(self) -> None:
-        if self.settings_window is not None and self.settings_window.winfo_exists():
-            self.settings_window.lift()
-            self.settings_window.focus_force()
-            return
+        if self.settings_window and self.settings_window.winfo_exists():
+            self.settings_window.lift(); self.settings_window.focus_force(); return
 
-        win = tk.Toplevel(self.root)
+        win = ctk.CTkToplevel(self.root)
         win.title("Shift Settings  (Ctrl+,)")
-        win.geometry("820x420")
+        win.geometry("860x440")
         win.resizable(False, False)
-        win.configure(bg=self.card)
+        win.configure(fg_color=SURFACE)
         self.settings_window = win
 
-        container = tk.Frame(win, bg=self.card)
-        container.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
+        c = ctk.CTkFrame(win, fg_color=SURFACE)
+        c.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
 
-        tk.Label(
-            container,
-            text="Shift Settings",
-            bg=self.card,
-            fg=self.text_main,
-            font=("Segoe UI", 12, "bold"),
-        ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 8))
+        ctk.CTkLabel(c, text="SHIFT SETTINGS", text_color=TEXT_MUTED,
+                     font=(FONT_MONO, 10, "bold")).grid(
+            row=0, column=0, columnspan=7, sticky="w", pady=(0, 14))
 
-        tk.Label(container, text="Shift", bg=self.card, fg=self.text_muted, font=("Segoe UI", 9, "bold")).grid(
-            row=1, column=0, padx=(6, 10), sticky="w"
-        )
-        tk.Label(container, text="Start (HH:MM)", bg=self.card, fg=self.text_muted, font=("Segoe UI", 9, "bold")).grid(
-            row=1, column=1, padx=(0, 10), sticky="w"
-        )
-        tk.Label(container, text="End (HH:MM)", bg=self.card, fg=self.text_muted, font=("Segoe UI", 9, "bold")).grid(
-            row=1, column=2, padx=(0, 10), sticky="w"
-        )
-        tk.Label(
-            container,
-            text="Reminder (minutes before end)",
-            bg=self.card,
-            fg=self.text_muted,
-            font=("Segoe UI", 9, "bold"),
-        ).grid(row=1, column=3, padx=(0, 10), sticky="w")
+        lbl_cfg = dict(text_color=TEXT_MUTED, font=(FONT_UI, 9, "bold"))
+        for col, text in enumerate(["Shift", "Start (HH:MM)", "End (HH:MM)",
+                                    "Reminder (min before end)"]):
+            ctk.CTkLabel(c, text=text, **lbl_cfg).grid(
+                row=1, column=col, padx=(0, 12), sticky="w")
 
-        self.shift_hour_vars = {}
+        self.shift_hour_vars     = {}
         self.shift_reminder_vars = {}
-        row_idx = 2
-        for shift_name in ("morning", "evening", "night"):
-            tk.Label(
-                container,
-                text=shift_name.capitalize(),
-                bg=self.card,
-                fg=self.text_main,
-                font=("Segoe UI", 10, "bold"),
-            ).grid(row=row_idx, column=0, padx=(6, 10), pady=(0, 8), sticky="w")
+        entry_cfg = dict(width=90, height=32, fg_color=BG, text_color=TEXT,
+                         border_color=BORDER, border_width=1, font=(FONT_MONO, 10))
 
-            start_var = tk.StringVar()
-            start_entry = tk.Entry(
-                container,
-                textvariable=start_var,
-                width=8,
-                bg="#0b1324",
-                fg=self.text_main,
-                insertbackground=self.text_main,
-                relief=tk.FLAT,
-                justify="center",
-            )
-            start_entry.grid(row=row_idx, column=1, padx=(0, 10), pady=(0, 8), sticky="w")
-            start_entry.bind("<KeyRelease>", lambda _e: self._refresh_shift_preview())
+        for ri, sn in enumerate(("morning", "evening", "night"), start=2):
+            ctk.CTkLabel(c, text=sn.capitalize(), text_color=TEXT,
+                         font=(FONT_UI, 10, "bold")).grid(
+                row=ri, column=0, padx=(0, 12), pady=(0, 10), sticky="w")
+            sv, ev, rv = tk.StringVar(), tk.StringVar(), tk.StringVar(value="30")
+            for ci, var in enumerate([sv, ev, rv], start=1):
+                e = ctk.CTkEntry(c, textvariable=var, **entry_cfg)
+                e.grid(row=ri, column=ci, padx=(0, 12), pady=(0, 10), sticky="w")
+                e.bind("<KeyRelease>", lambda _e: self._refresh_shift_preview())
+            self.shift_hour_vars[sn]     = (sv, ev)
+            self.shift_reminder_vars[sn] = rv
 
-            end_var = tk.StringVar()
-            end_entry = tk.Entry(
-                container,
-                textvariable=end_var,
-                width=8,
-                bg="#0b1324",
-                fg=self.text_main,
-                insertbackground=self.text_main,
-                relief=tk.FLAT,
-                justify="center",
-            )
-            end_entry.grid(row=row_idx, column=2, padx=(0, 10), pady=(0, 8), sticky="w")
-            end_entry.bind("<KeyRelease>", lambda _e: self._refresh_shift_preview())
+        btn_row = 5
+        ghost_btn = dict(border_width=1, border_color=BORDER, font=(FONT_UI, 10, "bold"))
+        for col, (txt, fg, hvr, cmd) in enumerate([
+            ("SAVE",          ACCENT,      ACCENT_HVR,  self.save_shift_hours),
+            ("RESET DEFAULT", SURFACE_ALT, BORDER_LT,   self.reset_settings_to_default),
+            ("CLOSE",         SURFACE_ALT, BORDER_LT,   win.destroy),
+        ]):
+            ctk.CTkButton(c, text=txt, width=130, height=32,
+                          fg_color=fg, hover_color=hvr, text_color=TEXT,
+                          command=cmd, **ghost_btn).grid(
+                row=btn_row, column=col, padx=(0, 10), pady=(6, 0), sticky="w")
 
-            reminder_var = tk.StringVar(value="30")
-            reminder_entry = tk.Entry(
-                container,
-                textvariable=reminder_var,
-                width=8,
-                bg="#0b1324",
-                fg=self.text_main,
-                insertbackground=self.text_main,
-                relief=tk.FLAT,
-                justify="center",
-            )
-            reminder_entry.grid(row=row_idx, column=3, padx=(0, 10), pady=(0, 8), sticky="w")
-            reminder_entry.bind("<KeyRelease>", lambda _e: self._refresh_shift_preview())
+        ctk.CTkLabel(c, textvariable=self.shift_preview_var,
+                     text_color=TEXT_DIM, font=(FONT_MONO, 9)).grid(
+            row=btn_row + 1, column=0, columnspan=7, sticky="w", pady=(10, 0))
 
-            self.shift_hour_vars[shift_name] = (start_var, end_var)
-            self.shift_reminder_vars[shift_name] = reminder_var
-            row_idx += 1
+        sep = ctk.CTkFrame(c, fg_color=BORDER, height=1)
+        sep.grid(row=btn_row + 2, column=0, columnspan=7, sticky="ew", pady=(18, 14))
 
-        tk.Button(
-            container,
-            text="SAVE",
-            bg="#0f4c81",
-            fg="#ffffff",
-            activebackground="#145ea8",
-            relief=tk.FLAT,
-            command=self.save_shift_hours,
-        ).grid(row=row_idx, column=2, padx=(0, 8), pady=(4, 8), sticky="e")
+        ctk.CTkLabel(c, text="AUTO REFRESH", text_color=TEXT_MUTED,
+                     font=(FONT_MONO, 9, "bold")).grid(
+            row=btn_row + 3, column=0, columnspan=7, sticky="w", pady=(0, 10))
 
-        tk.Button(
-            container,
-            text="RESET DEFAULT",
-            bg="#7c2d12",
-            fg="#ffffff",
-            activebackground="#9a3412",
-            relief=tk.FLAT,
-            command=self.reset_settings_to_default,
-        ).grid(row=row_idx, column=3, padx=(0, 8), pady=(4, 8), sticky="w")
+        self.settings_auto_refresh_check = ctk.CTkCheckBox(
+            c, text="Enable", variable=self.auto_refresh_var,
+            text_color=TEXT_MUTED, font=(FONT_UI, 10),
+            command=self._toggle_auto_refresh)
+        self.settings_auto_refresh_check.grid(
+            row=btn_row + 4, column=0, padx=(0, 16), sticky="w")
 
-        tk.Button(
-            container,
-            text="CLOSE",
-            bg="#374151",
-            fg="#ffffff",
-            activebackground="#4b5563",
-            relief=tk.FLAT,
-            command=win.destroy,
-        ).grid(row=row_idx, column=4, padx=(0, 0), pady=(4, 8), sticky="w")
+        ctk.CTkLabel(c, text="Profile", **lbl_cfg).grid(
+            row=btn_row + 4, column=1, padx=(0, 6), sticky="w")
+        self.refresh_profile_combo = ctk.CTkComboBox(
+            c, values=["Realtime", "Balanced", "Low API Load", "Custom"],
+            width=140, state="readonly",
+            command=lambda _v: self._on_profile_changed())
+        self.refresh_profile_combo.grid(row=btn_row + 4, column=2, padx=(0, 16), sticky="w")
+        self.refresh_profile_combo.set(self.refresh_profile_var.get())
 
-        tk.Label(
-            container,
-            textvariable=self.shift_preview_var,
-            bg=self.card,
-            fg=self.text_main,
-            font=("Segoe UI", 9),
-            justify=tk.LEFT,
-        ).grid(row=row_idx + 1, column=0, columnspan=6, padx=(6, 0), pady=(6, 0), sticky="w")
+        ctk.CTkLabel(c, text="Interval", **lbl_cfg).grid(
+            row=btn_row + 4, column=3, padx=(0, 6), sticky="w")
+        self.refresh_interval_combo = ctk.CTkComboBox(
+            c, values=["10", "15", "30", "45", "60", "120", "300", "600"],
+            width=80, command=lambda _v: self._set_profile_custom())
+        self.refresh_interval_combo.grid(row=btn_row + 4, column=4, padx=(0, 8), sticky="w")
+        self.refresh_interval_combo.set(self.refresh_interval_var.get())
 
-        tk.Label(
-            container,
-            text="Auto Refresh Settings",
-            bg=self.card,
-            fg=self.text_main,
-            font=("Segoe UI", 11, "bold"),
-        ).grid(row=row_idx + 2, column=0, columnspan=6, sticky="w", pady=(18, 6))
-
-        self.settings_auto_refresh_check = tk.Checkbutton(
-            container,
-            text="Enable Auto Refresh",
-            variable=self.auto_refresh_var,
-            bg=self.card,
-            fg=self.text_muted,
-            activebackground=self.card,
-            activeforeground=self.text_main,
-            selectcolor="#0b1324",
-            font=("Segoe UI", 9, "bold"),
-            command=self._toggle_auto_refresh,
-        )
-        self.settings_auto_refresh_check.grid(row=row_idx + 3, column=0, columnspan=2, padx=(6, 8), sticky="w")
-
-        tk.Label(
-            container,
-            text="Profile",
-            bg=self.card,
-            fg=self.text_muted,
-            font=("Segoe UI", 9),
-        ).grid(row=row_idx + 3, column=2, padx=(8, 4), sticky="w")
-
-        self.refresh_profile_combo = ttk.Combobox(
-            container,
-            textvariable=self.refresh_profile_var,
-            values=["Realtime", "Balanced", "Low API Load", "Custom"],
-            width=13,
-            state="readonly",
-        )
-        self.refresh_profile_combo.grid(row=row_idx + 3, column=3, padx=(0, 8), sticky="w")
-        self.refresh_profile_combo.bind("<<ComboboxSelected>>", self._on_profile_changed)
-
-        tk.Label(
-            container,
-            text="Interval (seconds)",
-            bg=self.card,
-            fg=self.text_muted,
-            font=("Segoe UI", 9),
-        ).grid(row=row_idx + 3, column=4, padx=(8, 4), sticky="w")
-
-        self.refresh_interval_combo = ttk.Combobox(
-            container,
-            textvariable=self.refresh_interval_var,
-            values=["10", "15", "30", "45", "60", "120", "300", "600"],
-            width=8,
-        )
-        self.refresh_interval_combo.grid(row=row_idx + 3, column=5, padx=(0, 8), sticky="w")
-        self.refresh_interval_combo.bind("<KeyRelease>", lambda _e: self._set_profile_custom())
-        self.refresh_interval_combo.bind("<<ComboboxSelected>>", lambda _e: self._set_profile_custom())
-
-        self.refresh_unit_combo = ttk.Combobox(
-            container,
-            textvariable=self.refresh_interval_unit_var,
-            values=["Seconds", "Minutes", "Hours"],
-            width=10,
-            state="readonly",
-        )
-        self.refresh_unit_combo.grid(row=row_idx + 3, column=6, padx=(0, 8), sticky="w")
-        self.refresh_unit_combo.bind("<<ComboboxSelected>>", lambda _e: self._set_profile_custom())
-
-        tk.Label(
-            container,
-            text="(Allowed: 5 - 3600)",
-            bg=self.card,
-            fg=self.text_muted,
-            font=("Segoe UI", 8),
-        ).grid(row=row_idx + 4, column=4, columnspan=3, padx=(2, 0), sticky="w")
+        self.refresh_unit_combo = ctk.CTkComboBox(
+            c, values=["Seconds", "Minutes", "Hours"],
+            width=110, state="readonly",
+            command=lambda _v: self._set_profile_custom())
+        self.refresh_unit_combo.grid(row=btn_row + 4, column=5, sticky="w")
+        self.refresh_unit_combo.set(self.refresh_interval_unit_var.get())
 
         self._load_shift_hours_into_form()
         self._apply_profile_to_interval(set_custom_if_manual=False)
@@ -679,142 +640,126 @@ class SchedulerGui:
 
     def _set_profile_custom(self) -> None:
         self.refresh_profile_var.set("Custom")
+        if hasattr(self, "refresh_profile_combo"):
+            self.refresh_profile_combo.set("Custom")
 
     def _on_profile_changed(self, _event=None) -> None:
+        self._sync_refresh_combo_to_vars()
         self._apply_profile_to_interval(set_custom_if_manual=False)
 
     def _apply_profile_to_interval(self, set_custom_if_manual: bool = True) -> None:
         profile = self.refresh_profile_var.get()
         if profile in self.REFRESH_PROFILES:
             self._set_interval_fields_from_seconds(self.REFRESH_PROFILES[profile])
+            for attr, getter in [("refresh_interval_combo", lambda: self.refresh_interval_var.get()),
+                                  ("refresh_unit_combo",     lambda: self.refresh_interval_unit_var.get()),
+                                  ("refresh_profile_combo",  lambda: profile)]:
+                if hasattr(self, attr):
+                    getattr(self, attr).set(getter())
             return
         if set_custom_if_manual:
             self.refresh_profile_var.set("Custom")
+            if hasattr(self, "refresh_profile_combo"):
+                self.refresh_profile_combo.set("Custom")
 
     def _refresh_shift_preview(self, reminders: dict | None = None) -> None:
         if reminders is None:
             reminders = {}
-            for shift_name, vars_pair in self.shift_hour_vars.items():
+            for sn, (_, ev) in self.shift_hour_vars.items():
                 try:
-                    end_raw = vars_pair[1].get().strip()
-                    hh, mm = end_raw.split(":")
-                    end_minutes = int(hh) * 60 + int(mm)
-                    offset_raw = self.shift_reminder_vars.get(shift_name).get().strip() if shift_name in self.shift_reminder_vars else "30"
-                    offset_minutes = int(offset_raw)
-                    rem_minutes = (end_minutes - offset_minutes) % (24 * 60)
-                    reminders[shift_name] = f"{rem_minutes // 60:02d}:{rem_minutes % 60:02d}"
-                except (ValueError, AttributeError):
-                    reminders[shift_name] = "--:--"
-
+                    hh, mm  = ev.get().strip().split(":")
+                    end_min = int(hh) * 60 + int(mm)
+                    offset  = int(self.shift_reminder_vars[sn].get().strip())
+                    rem     = (end_min - offset) % (24 * 60)
+                    reminders[sn] = f"{rem // 60:02d}:{rem % 60:02d}"
+                except (ValueError, AttributeError, KeyError):
+                    reminders[sn] = "--:--"
         self.shift_preview_var.set(
-            "Reminder preview: "
-            f"M {reminders.get('morning', '--:--')} | "
-            f"E {reminders.get('evening', '--:--')} | "
-            f"N {reminders.get('night', '--:--')}"
-        )
+            f"Preview  ·  M {reminders.get('morning','--:--')}  "
+            f"E {reminders.get('evening','--:--')}  "
+            f"N {reminders.get('night','--:--')}")
 
     def save_shift_hours(self) -> None:
+        self._sync_refresh_combo_to_vars()
         self._apply_profile_to_interval(set_custom_if_manual=False)
         try:
             interval_seconds = self._interval_seconds_from_fields()
         except ValueError:
-            messagebox.showerror("Invalid Refresh Interval", "Refresh interval value must be an integer.")
-            return
+            messagebox.showerror("Invalid Input", "Refresh interval must be an integer."); return
         if not (5 <= interval_seconds <= 86400):
-            messagebox.showerror("Invalid Refresh Interval", "Refresh interval must be between 5 seconds and 24 hours.")
-            return
+            messagebox.showerror("Invalid Input", "Interval must be between 5s and 24h."); return
 
         self.auto_refresh_ms = interval_seconds * 1000
-        if self.refresh_profile_var.get() in self.REFRESH_PROFILES:
-            expected = self.REFRESH_PROFILES[self.refresh_profile_var.get()]
-            if expected != interval_seconds:
-                self.refresh_profile_var.set("Custom")
+        if (self.refresh_profile_var.get() in self.REFRESH_PROFILES and
+                self.REFRESH_PROFILES[self.refresh_profile_var.get()] != interval_seconds):
+            self.refresh_profile_var.set("Custom")
+            if hasattr(self, "refresh_profile_combo"):
+                self.refresh_profile_combo.set("Custom")
         self._save_gui_preferences()
 
-        new_hours: dict[str, dict[str, str]] = {}
-        for shift_name, vars_pair in self.shift_hour_vars.items():
-            start_raw = vars_pair[0].get().strip()
-            end_raw = vars_pair[1].get().strip()
-            reminder_raw = self.shift_reminder_vars[shift_name].get().strip() if shift_name in self.shift_reminder_vars else "30"
+        new_hours: dict[str, dict] = {}
+        for sn, (sv, ev) in self.shift_hour_vars.items():
             try:
-                start_hh, start_mm = start_raw.split(":")
-                end_hh, end_mm = end_raw.split(":")
-                start_hour = int(start_hh)
-                start_minute = int(start_mm)
-                end_hour = int(end_hh)
-                end_minute = int(end_mm)
-                reminder_minutes = int(reminder_raw)
+                sh, sm = sv.get().strip().split(":")
+                eh, em = ev.get().strip().split(":")
+                rm     = int(self.shift_reminder_vars[sn].get().strip())
+                sh, sm, eh, em = int(sh), int(sm), int(eh), int(em)
             except ValueError:
-                messagebox.showerror(
-                    "Invalid Shift Setting",
-                    f"{shift_name.capitalize()} start/end must be HH:MM and reminder must be an integer.",
-                )
-                return
-            if not (
-                0 <= start_hour <= 23
-                and 0 <= end_hour <= 23
-                and 0 <= start_minute <= 59
-                and 0 <= end_minute <= 59
-            ):
-                messagebox.showerror("Invalid Shift Time", f"{shift_name.capitalize()} time must be valid within 00:00 to 23:59.")
-                return
-            if not (0 <= reminder_minutes <= 720):
-                messagebox.showerror("Invalid Reminder", f"{shift_name.capitalize()} reminder must be between 0 and 720 minutes.")
-                return
-            new_hours[shift_name] = {
-                "start_time": f"{start_hour:02d}:{start_minute:02d}",
-                "end_time": f"{end_hour:02d}:{end_minute:02d}",
-                "reminder_minutes": reminder_minutes,
-            }
-
+                messagebox.showerror("Invalid Input",
+                    f"{sn.capitalize()}: use HH:MM format and integer reminder."); return
+            if not (0 <= sh <= 23 and 0 <= sm <= 59 and 0 <= eh <= 23 and 0 <= em <= 59):
+                messagebox.showerror("Invalid Time",
+                    f"{sn.capitalize()}: time out of valid range."); return
+            if not (0 <= rm <= 720):
+                messagebox.showerror("Invalid Reminder",
+                    f"{sn.capitalize()}: reminder must be 0–720 min."); return
+            new_hours[sn] = {"start_time": f"{sh:02d}:{sm:02d}",
+                              "end_time":   f"{eh:02d}:{em:02d}",
+                              "reminder_minutes": rm}
         try:
             with open(self.shift_settings_file, "w", encoding="utf-8") as f:
                 json.dump({"shift_hours": new_hours}, f, indent=2)
         except OSError as e:
-            messagebox.showerror("Save Failed", f"Failed to save shift settings: {e}")
-            return
+            messagebox.showerror("Save Failed", str(e)); return
 
         self._refresh_shift_preview()
         self._apply_auto_refresh_info_label()
         self._schedule_next_auto_refresh()
-        do_restart = messagebox.askyesno(
-            "Shift Hours Saved",
-            "Settings saved successfully.\n\nRestart scheduler now to apply new shift schedule?",
-        )
-        if do_restart:
+        if messagebox.askyesno("Saved", "Settings saved.\n\nRestart scheduler to apply?"):
             self._execute_action(self.restart_script, "Restart")
         else:
             self.refresh_status()
 
     def reset_settings_to_default(self) -> None:
-        defaults = {
-            "morning": ("07:00", "15:00", "30"),
-            "evening": ("15:00", "23:00", "30"),
-            "night": ("23:00", "07:00", "30"),
-        }
-        for shift_name, values in defaults.items():
-            if shift_name in self.shift_hour_vars:
-                self.shift_hour_vars[shift_name][0].set(values[0])
-                self.shift_hour_vars[shift_name][1].set(values[1])
-            if shift_name in self.shift_reminder_vars:
-                self.shift_reminder_vars[shift_name].set(values[2])
-
+        for sn, (s, e, r) in {"morning": ("07:00","15:00","30"),
+                               "evening": ("15:00","23:00","30"),
+                               "night":   ("23:00","07:00","30")}.items():
+            if sn in self.shift_hour_vars:
+                self.shift_hour_vars[sn][0].set(s)
+                self.shift_hour_vars[sn][1].set(e)
+            if sn in self.shift_reminder_vars:
+                self.shift_reminder_vars[sn].set(r)
         self.auto_refresh_var.set(True)
         self.refresh_profile_var.set("Balanced")
         self.refresh_interval_var.set("30")
+        self.refresh_interval_unit_var.set("Seconds")
         self.auto_refresh_ms = 30000
-
+        for attr, val in [("refresh_profile_combo","Balanced"),
+                           ("refresh_interval_combo","30"),
+                           ("refresh_unit_combo","Seconds")]:
+            if hasattr(self, attr):
+                getattr(self, attr).set(val)
         self._refresh_shift_preview()
         self._apply_auto_refresh_info_label()
         self._save_gui_preferences()
 
+    # ── Scheduler state ───────────────────────────────────────────────────────
+
     def _parse_scheduler_state(self, output: str) -> tuple[str, str]:
-        text = output.upper()
-        if "NOT RUNNING" in text:
-            return "NOT RUNNING", "Scheduler process is currently stopped."
-        if "RUNNING" in text:
-            return "RUNNING", "Scheduler process is active and waiting for reminder times."
-        return "UNKNOWN", "Unable to determine scheduler state from monitor output."
+        t = output.upper()
+        if "NOT RUNNING" in t: return "NOT RUNNING", "Scheduler process is stopped."
+        if "RUNNING"     in t: return "RUNNING",     "Scheduler is active and waiting for reminder times."
+        return "UNKNOWN", "Unable to determine scheduler state."
 
     def _fetch_previous_shift_snapshot(self) -> dict:
         code = (
@@ -825,138 +770,100 @@ class SchedulerGui:
             "current=wr.get_auto_shift()\n"
             "previous=order[(order.index(current)-1)%3]\n"
             "tickets=wr.get_inprogress_tickets() or []\n"
-            "payload={'current_shift': current, 'previous_shift': previous, 'pending_count': len(tickets), 'tickets': tickets[:25]}\n"
-            "print(json.dumps(payload))\n"
+            "print(json.dumps({'current_shift':current,'previous_shift':previous,"
+            "'pending_count':len(tickets),'tickets':tickets[:25]}))\n"
         )
-        result_code, output = self._run_python_inline(code)
-        if result_code != 0:
-            return {"error": output or "Failed to pull ticket snapshot."}
-
-        for line in reversed(output.splitlines()):
+        rc, out = self._run_python_inline(code)
+        if rc != 0:
+            return {"error": out or "Failed to pull snapshot."}
+        for line in reversed(out.splitlines()):
             line = line.strip()
-            if not line:
-                continue
-            try:
-                return json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-        return {"error": output or "No JSON payload returned."}
+            if not line: continue
+            try: return json.loads(line)
+            except json.JSONDecodeError: continue
+        return {"error": out or "No JSON payload returned."}
 
     def _update_ticket_table(self, tickets: list[dict]) -> None:
-        for row_id in self.ticket_table.get_children():
-            self.ticket_table.delete(row_id)
-
-        for item in tickets:
-            self.ticket_table.insert(
-                "",
-                tk.END,
-                values=(
-                    item.get("ticket_id", "N/A"),
-                    item.get("title", "N/A"),
-                    item.get("assigned_l1", "N/A"),
-                    item.get("severity", "N/A"),
-                    item.get("status", "N/A"),
-                    item.get("last_worklog", "N/A"),
-                ),
-            )
+        self.latest_tickets = tickets
+        self._refresh_filter_options(tickets)
+        self._resize_title_column()
+        self._render_filtered_ticket_rows()
 
     def _apply_refresh_payload(self, payload: dict) -> None:
-        mon_code = payload["monitor_code"]
-        mon_out = payload["monitor_output"]
-        scheduler_state, scheduler_msg = payload["scheduler_state"]
-        snapshot = payload["snapshot"]
+        mon_code, mon_out          = payload["monitor_code"], payload["monitor_output"]
+        scheduler_state, sched_msg = payload["scheduler_state"]
+        snapshot                   = payload["snapshot"]
 
-        self._set_output(mon_out if mon_out else "No monitor output.")
+        self._set_output(mon_out or "No monitor output.")
         if mon_code != 0:
             self.current_scheduler_state = "UNKNOWN"
-            self.scheduler_badge.configure(text="ERROR", bg=self.bad)
-            self.scheduler_detail.set("Failed to run monitor script.")
+            self.scheduler_badge.configure(text="ERROR", fg_color=BAD_DIM, text_color=BAD)
         else:
             self.current_scheduler_state = scheduler_state
-            if scheduler_state == "RUNNING":
-                self.scheduler_badge.configure(text="RUNNING", bg=self.good)
-            elif scheduler_state == "NOT RUNNING":
-                self.scheduler_badge.configure(text="STOPPED", bg=self.bad)
-            else:
-                self.scheduler_badge.configure(text="UNKNOWN", bg=self.warn)
-            self.scheduler_detail.set(scheduler_msg)
+            cfg = {
+                "RUNNING":     (GOOD_DIM, GOOD, "RUNNING"),
+                "NOT RUNNING": (BAD_DIM,  BAD,  "STOPPED"),
+            }.get(scheduler_state, (SURFACE_ALT, TEXT_MUTED, "UNKNOWN"))
+            self.scheduler_badge.configure(fg_color=cfg[0], text_color=cfg[1], text=cfg[2])
+            self.scheduler_detail.set(sched_msg)
 
         self._set_start_stop_button_for_state(self.current_scheduler_state)
 
         if "error" in snapshot:
-            self.prev_shift_badge.configure(text="API ERROR", bg=self.bad)
-            self.prev_shift_detail.set("Unable to load previous-shift ticket snapshot from API.")
-            self._update_ticket_table([])
-            return
+            self.prev_shift_badge.configure(text="API ERROR", fg_color=BAD_DIM, text_color=BAD)
+            self.prev_shift_detail.set("Unable to load ticket snapshot.")
+            self._update_ticket_table([]); return
 
-        previous_shift = str(snapshot.get("previous_shift", "N/A")).upper()
-        pending_count = int(snapshot.get("pending_count", 0))
+        prev    = str(snapshot.get("previous_shift", "N/A")).upper()
+        count   = int(snapshot.get("pending_count", 0))
         tickets = snapshot.get("tickets", [])
-        badge_color = self.good if pending_count == 0 else self.warn
-        self.prev_shift_badge.configure(text=f"{pending_count} PENDING", bg=badge_color)
+        clr     = GOOD_DIM if count == 0 else WARN_DIM
+        txt_clr = GOOD     if count == 0 else WARN
+        self.prev_shift_badge.configure(text=f"{count} PENDING", fg_color=clr, text_color=txt_clr)
         self.prev_shift_detail.set(
-            f"Previous shift: {previous_shift}. Showing pending carry-over tickets from API snapshot."
-        )
+            f"Previous shift: {prev}  ·  Pending carry-over tickets from API snapshot.")
         self._update_ticket_table(tickets)
 
     def _set_output(self, text: str) -> None:
         self.output.configure(state=tk.NORMAL)
         self.output.delete("1.0", tk.END)
-        self.output.insert(tk.END, text)
+        self.output.insert("1.0", text)
         self.output.configure(state=tk.DISABLED)
 
     def _execute_action(self, script_path: str, action_name: str) -> None:
         def worker() -> None:
             self._set_buttons_state(tk.DISABLED)
             code, out = self._run_ps(script_path)
-            self._set_output(out if out else f"No output for {action_name}.")
+            self._set_output(out or f"No output for {action_name}.")
             self._set_buttons_state(tk.NORMAL)
             self.refresh_status()
-
         threading.Thread(target=worker, daemon=True).start()
 
     def _set_buttons_state(self, state: str) -> None:
-        self.start_stop_btn.configure(state=state)
-        self.restart_btn.configure(state=state)
-        self.refresh_btn.configure(state=state)
-        self.settings_btn.configure(state=state)
+        for btn in [self.start_stop_btn, self.restart_btn,
+                    self.refresh_btn,    self.settings_btn]:
+            btn.configure(state=state)
 
     def _apply_auto_refresh_info_label(self) -> None:
-        profile = self.refresh_profile_var.get()
-        seconds = int(self.auto_refresh_ms / 1000)
-        if seconds % 3600 == 0:
-            interval_text = f"{seconds // 3600}h"
-        elif seconds % 60 == 0:
-            interval_text = f"{seconds // 60}m"
-        else:
-            interval_text = f"{seconds}s"
-        if self.auto_refresh_var.get():
-            if profile and profile != "Custom":
-                self.auto_refresh_info_var.set(
-                    f"Auto refresh: ON ({interval_text}, {profile})"
-                )
-            else:
-                self.auto_refresh_info_var.set(f"Auto refresh: ON ({interval_text})")
-        else:
-            self.auto_refresh_info_var.set("Auto refresh: OFF")
+        s = int(self.auto_refresh_ms / 1000)
+        t = f"{s//3600}h" if s % 3600 == 0 else f"{s//60}m" if s % 60 == 0 else f"{s}s"
+        p = self.refresh_profile_var.get()
+        label = ("↻  " + t + (f"  ·  {p}" if p and p != "Custom" else "")
+                 if self.auto_refresh_var.get() else "↻  off")
+        self.auto_refresh_info_var.set(label)
 
-    def _set_start_stop_button_for_state(self, scheduler_state: str) -> None:
-        if scheduler_state == "RUNNING":
+    def _set_start_stop_button_for_state(self, state: str) -> None:
+        if state == "RUNNING":
             self.start_stop_btn.configure(
-                text="STOP",
-                bg="#7f1d1d",
-                activebackground="#991b1b",
-            )
+                text="STOP", fg_color=BAD_DIM, hover_color="#5a1010",
+                text_color=BAD, border_color=BAD)
         else:
             self.start_stop_btn.configure(
-                text="START",
-                bg="#0f5132",
-                activebackground="#146c43",
-            )
+                text="START", fg_color=GOOD_DIM, hover_color="#073a1a",
+                text_color=GOOD, border_color=GOOD)
 
     def _schedule_next_auto_refresh(self) -> None:
-        if self.auto_refresh_job is not None:
+        if self.auto_refresh_job:
             self.root.after_cancel(self.auto_refresh_job)
             self.auto_refresh_job = None
         if self.auto_refresh_var.get():
@@ -967,7 +874,7 @@ class SchedulerGui:
         self._apply_auto_refresh_info_label()
         if self.auto_refresh_var.get():
             self._schedule_next_auto_refresh()
-        elif self.auto_refresh_job is not None:
+        elif self.auto_refresh_job:
             self.root.after_cancel(self.auto_refresh_job)
             self.auto_refresh_job = None
 
@@ -982,33 +889,28 @@ class SchedulerGui:
 
     def refresh_status(self) -> None:
         self._set_buttons_state(tk.DISABLED)
-        self.scheduler_badge.configure(text="CHECKING...", bg="#334155")
-        self.prev_shift_badge.configure(text="LOADING...", bg="#334155")
+        self.scheduler_badge.configure(text="…", fg_color=SURFACE_ALT, text_color=TEXT_MUTED)
+        self.prev_shift_badge.configure(text="…", fg_color=SURFACE_ALT, text_color=TEXT_MUTED)
 
         def worker() -> None:
             mon_code, mon_out = self._run_ps(self.monitor_script)
-            scheduler_state = self._parse_scheduler_state(mon_out)
-            snapshot = self._fetch_previous_shift_snapshot()
-            payload = {
-                "monitor_code": mon_code,
-                "monitor_output": mon_out,
-                "scheduler_state": scheduler_state,
-                "snapshot": snapshot,
-            }
+            scheduler_state   = self._parse_scheduler_state(mon_out)
+            snapshot          = self._fetch_previous_shift_snapshot()
+            payload = {"monitor_code": mon_code, "monitor_output": mon_out,
+                       "scheduler_state": scheduler_state, "snapshot": snapshot}
             self.root.after(0, lambda: self._on_refresh_done(payload))
-
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_refresh_done(self, payload: dict) -> None:
         self._apply_refresh_payload(payload)
-        self.last_updated_var.set(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        self.last_updated_var.set(datetime.now().strftime("%H:%M:%S"))
         self._set_buttons_state(tk.NORMAL)
         self._schedule_next_auto_refresh()
 
 
 def main() -> None:
-    root = tk.Tk()
-    app = SchedulerGui(root)
+    root = ctk.CTk()
+    SchedulerGui(root)
     root.protocol("WM_DELETE_WINDOW", root.destroy)
     root.mainloop()
 
@@ -1017,4 +919,4 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        messagebox.showerror("MESDP Scheduler Control", f"Failed to start GUI: {exc}")
+        messagebox.showerror("MESDP Scheduler Control", f"Failed to start: {exc}")
