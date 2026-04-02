@@ -316,8 +316,8 @@ SHIFT_REMINDER_TIMES, SHIFTS = _build_shift_metadata(SHIFT_HOURS, SHIFT_TIMES, S
 # PULL DATA FROM MESDP API
 # ─────────────────────────────────────────
 
-def get_inprogress_tickets() -> Optional[List[Dict]]:
-    """Fetch all 'In Progress' tickets from ManageEngine SDP MSP API."""
+def get_inprogress_summary() -> Optional[Dict]:
+    """Fetch in-progress ticket summary including pending and updated-today counts."""
     base_url   = CONFIG["mesdp"]["base_url"]
     auth_token = CONFIG["mesdp"]["auth_token"]
 
@@ -363,57 +363,75 @@ def get_inprogress_tickets() -> Optional[List[Dict]]:
         print(f"❌ API Connection Error: {e}")
         return []
 
-    data          = response.json()
-    requests_list = data.get("requests", [])
-    today         = date.today()
-    tickets       = []
+    data               = response.json()
+    requests_list      = data.get("requests", [])
+    today              = date.today()
+    pending_tickets    = []
+    updated_today_count = 0
+    total_considered   = 0
 
     for req in requests_list:
-        req_id       = req.get("id")
-        last_worklog = get_last_worklog_date(req_id, auth_token, base_url)
+        req_id = req.get("id")
 
+        # Prefer severity from the Priority section, with fallback to Level.
+        priority_data = req.get("priority") or {}
+        if isinstance(priority_data, dict):
+            severity = priority_data.get("name") or priority_data.get("value") or priority_data.get("display_value") or "N/A"
+        elif isinstance(priority_data, str):
+            severity = priority_data
+        else:
+            severity = "N/A"
+
+        if severity == "N/A":
+            level_data = req.get("level") or {}
+            if isinstance(level_data, dict):
+                severity = level_data.get("name") or level_data.get("value") or "N/A"
+            elif isinstance(level_data, str):
+                severity = level_data
+
+        # Exclude tickets with severity PM from counts and table.
+        if str(severity).strip().upper() == "PM":
+            continue
+
+        total_considered += 1
+        last_worklog = get_last_worklog_date(req_id, auth_token, base_url)
         technician = req.get("technician") or {}
 
-        # Add to list if worklog not updated today
-        if last_worklog is None or last_worklog < today:
-            # Prefer severity from the Priority section, with fallback to Level.
-            priority_data = req.get("priority") or {}
-            if isinstance(priority_data, dict):
-                severity = priority_data.get("name") or priority_data.get("value") or priority_data.get("display_value") or "N/A"
-            elif isinstance(priority_data, str):
-                severity = priority_data
-            else:
-                severity = "N/A"
+        status_data = req.get("status") or {}
+        if isinstance(status_data, dict):
+            ticket_status = status_data.get("name") or status_data.get("value") or status_data.get("display_value") or "In Progress"
+        elif isinstance(status_data, str):
+            ticket_status = status_data
+        else:
+            ticket_status = "In Progress"
 
-            if severity == "N/A":
-                level_data = req.get("level") or {}
-                if isinstance(level_data, dict):
-                    severity = level_data.get("name") or level_data.get("value") or "N/A"
-                elif isinstance(level_data, str):
-                    severity = level_data
+        if last_worklog is not None and last_worklog >= today:
+            updated_today_count += 1
+            continue
 
-            # Exclude tickets with severity PM.
-            if str(severity).strip().upper() == "PM":
-                continue
+        pending_tickets.append({
+            "ticket_id": f"#{req_id}",
+            "title": req.get("subject", "No Subject"),
+            "assigned_l1": technician.get("name", "Unassigned"),
+            "severity": severity if severity else "N/A",
+            "status": ticket_status,
+            "last_worklog": str(last_worklog) if last_worklog else "No record",
+        })
 
-            status_data = req.get("status") or {}
-            if isinstance(status_data, dict):
-                ticket_status = status_data.get("name") or status_data.get("value") or status_data.get("display_value") or "In Progress"
-            elif isinstance(status_data, str):
-                ticket_status = status_data
-            else:
-                ticket_status = "In Progress"
-            
-            tickets.append({
-                "ticket_id":   f"#{req_id}",
-                "title":       req.get("subject", "No Subject"),
-                "assigned_l1": technician.get("name", "Unassigned"),
-                "severity": severity if severity else "N/A",
-                "status": ticket_status,
-                "last_worklog": str(last_worklog) if last_worklog else "No record",
-            })
+    return {
+        "tickets": pending_tickets,
+        "pending_count": len(pending_tickets),
+        "updated_today_count": updated_today_count,
+        "total_in_progress": total_considered,
+    }
 
-    return tickets
+
+def get_inprogress_tickets() -> Optional[List[Dict]]:
+    """Fetch pending 'In Progress' tickets (worklog not updated today)."""
+    summary = get_inprogress_summary()
+    if summary is None:
+        return []
+    return summary.get("tickets", [])
 
 
 def get_last_worklog_date(request_id: int, auth_token: str, base_url: str) -> Optional[date]:
