@@ -265,16 +265,16 @@ class SchedulerGui:
         hinner = ctk.CTkFrame(hcard, fg_color="transparent")
         hinner.pack(padx=20, pady=14)
         ctk.CTkLabel(hinner, text="🎫 CLL MESDP TICKETING WORKLOG",
-                 text_color=TEXT, font=(FONT_EMOJI, 22, "bold")).pack()
+             text_color=TEXT, font=(FONT_EMOJI, 22, "bold")).pack()
         ctk.CTkLabel(hinner,
                  text="🧭 Scheduler monitor  ·  🔔 worklog reminder  ·  📸 shift snapshot",
-                     text_color=TEXT_MUTED, font=(FONT_EMOJI, 14)).pack(pady=(4, 0))
+                 text_color=TEXT_MUTED, font=(FONT_EMOJI, 14)).pack(pady=(4, 0))
 
         # Toolbar
         toolbar = ctk.CTkFrame(outer, fg_color="transparent")
         toolbar.pack(fill=tk.X, pady=(0, 14))
 
-        btn_cfg = dict(width=124, height=38, corner_radius=4, font=(FONT_EMOJI, 11, "bold"))
+        btn_cfg = dict(width=124, height=38, corner_radius=4, font=(FONT_UI, 11, "bold"))
         ghost   = dict(fg_color=SURFACE_ALT, hover_color=BORDER_LT, text_color=TEXT,
                        border_width=1, border_color=BORDER)
 
@@ -306,11 +306,11 @@ class SchedulerGui:
 
         self.auto_refresh_info_var = tk.StringVar(value="🔄 Auto Refresh: 30 secs")
         ctk.CTkLabel(meta, textvariable=self.auto_refresh_info_var,
-                 text_color=TEXT_DIM, font=(FONT_EMOJI, 12)).pack(anchor="e")
+             text_color=TEXT_DIM, font=(FONT_EMOJI, 12)).pack(anchor="e")
 
         self.auto_refresh_count_var = tk.StringVar(value="⏳ Count: 00:30")
         ctk.CTkLabel(meta, textvariable=self.auto_refresh_count_var,
-                 text_color=TEXT_DIM, font=(FONT_EMOJI, 12)).pack(anchor="e", pady=(2, 0))
+             text_color=TEXT_DIM, font=(FONT_EMOJI, 12)).pack(anchor="e", pady=(2, 0))
 
         # Status cards
         cards = ctk.CTkFrame(outer, fg_color="transparent")
@@ -321,7 +321,7 @@ class SchedulerGui:
         sc = self._make_card(cards)
         sc.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
         ctk.CTkLabel(sc, text="🧭 SCHEDULER", text_color=TEXT_MUTED,
-                     font=(FONT_EMOJI, 12, "bold")).pack(anchor="w", padx=16, pady=(14, 6))
+                 font=(FONT_EMOJI, 12, "bold")).pack(anchor="w", padx=16, pady=(14, 6))
 
         status_row = ctk.CTkFrame(sc, fg_color="transparent")
         status_row.pack(anchor="w", padx=16, pady=(0, 4))
@@ -345,7 +345,7 @@ class SchedulerGui:
         snap = self._make_card(cards)
         snap.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
         ctk.CTkLabel(snap, text="📸 PREVIOUS SHIFT SNAPSHOT", text_color=TEXT_MUTED,
-                     font=(FONT_EMOJI, 12, "bold")).pack(anchor="w", padx=16, pady=(14, 6))
+                 font=(FONT_EMOJI, 12, "bold")).pack(anchor="w", padx=16, pady=(14, 6))
         self.total_ticket_badge = self._make_badge(snap, "TOTAL TICKET: --", SURFACE_ALT, TEXT_MUTED)
         self.total_ticket_badge.pack(anchor="w", padx=16, pady=(0, 4))
         self.updated_today_badge = self._make_badge(snap, "UPDATED TODAY: --", SURFACE_ALT, TEXT_MUTED)
@@ -365,7 +365,7 @@ class SchedulerGui:
         thead = ctk.CTkFrame(tcard, fg_color="transparent")
         thead.pack(fill=tk.X, padx=16, pady=(14, 10))
         ctk.CTkLabel(thead, text="🎫 PENDING TICKETS", text_color=TEXT_MUTED,
-                     font=(FONT_EMOJI, 12, "bold")).pack(side=tk.LEFT)
+                 font=(FONT_EMOJI, 12, "bold")).pack(side=tk.LEFT)
         ctk.CTkLabel(thead, textvariable=self.table_count_var,
                      text_color=TEXT_DIM, font=(FONT_MONO, 12)).pack(side=tk.RIGHT)
 
