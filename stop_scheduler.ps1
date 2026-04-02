@@ -1,10 +1,16 @@
 $projectRoot = $PSScriptRoot
+$parentRoot = Split-Path $projectRoot -Parent
 
 $running = Get-CimInstance Win32_Process |
     Where-Object {
         $_.CommandLine -and
-        $_.CommandLine -like "*worklog_reminder.py*--schedule*" -and
-        $_.CommandLine -like "*$projectRoot*"
+        (
+            $_.CommandLine -like "*worklog_reminder.py*--schedule*" -or
+            $_.CommandLine -like "*MESDP Scheduler Control.exe*--schedule*"
+        ) -and (
+            $_.CommandLine -like "*$projectRoot*" -or
+            $_.CommandLine -like "*$parentRoot*"
+        )
     }
 
 if (-not $running) {

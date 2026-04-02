@@ -4,14 +4,20 @@ param(
 )
 
 $projectRoot = $PSScriptRoot
+$parentRoot = Split-Path $projectRoot -Parent
 $stdoutLog = Join-Path $projectRoot "logs\scheduler.out.log"
 $stderrLog = Join-Path $projectRoot "logs\scheduler.err.log"
 
 $running = Get-CimInstance Win32_Process |
     Where-Object {
         $_.CommandLine -and
-        $_.CommandLine -like "*worklog_reminder.py*--schedule*" -and
-        $_.CommandLine -like "*$projectRoot*"
+        (
+            $_.CommandLine -like "*worklog_reminder.py*--schedule*" -or
+            $_.CommandLine -like "*MESDP Scheduler Control.exe*--schedule*"
+        ) -and (
+            $_.CommandLine -like "*$projectRoot*" -or
+            $_.CommandLine -like "*$parentRoot*"
+        )
     }
 
 if ($running) {

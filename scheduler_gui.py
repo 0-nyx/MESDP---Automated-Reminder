@@ -344,6 +344,8 @@ class SchedulerGui:
             toolbar, text="🔁 RESTART", command=self.restart_scheduler, **btn_cfg, **ghost)
         self.refresh_btn = ctk.CTkButton(
             toolbar, text="🔄 REFRESH", command=self.refresh_status, **btn_cfg, **ghost)
+        self.run_now_btn = ctk.CTkButton(
+            toolbar, text="⚡ RUN NOW", command=self.run_one_time_report, **btn_cfg, **ghost)
         self.settings_btn = ctk.CTkButton(
             toolbar, text="🛠 SETTINGS", text_color=TEXT_MUTED,
             fg_color=SURFACE_ALT, hover_color=BORDER_LT,
@@ -359,13 +361,13 @@ class SchedulerGui:
             **btn_cfg, **ghost)
 
         for i, btn in enumerate([self.start_stop_btn, self.restart_btn,
-                                   self.refresh_btn, self.settings_btn, self.app_config_btn,
-                                   self.terminal_btn]):
+                                   self.refresh_btn, self.run_now_btn, self.settings_btn,
+                                   self.app_config_btn, self.terminal_btn]):
             btn.grid(row=0, column=i, padx=(0, 8))
 
-        toolbar.columnconfigure(6, weight=1)
+        toolbar.columnconfigure(7, weight=1)
         meta = ctk.CTkFrame(toolbar, fg_color="transparent")
-        meta.grid(row=0, column=7, sticky="e")
+        meta.grid(row=0, column=8, sticky="e")
 
         self.auto_refresh_info_var = tk.StringVar(value="🔄 Auto Refresh: 30 secs")
         ctk.CTkLabel(meta, textvariable=self.auto_refresh_info_var,
@@ -1446,9 +1448,51 @@ class SchedulerGui:
 
     def _set_buttons_state(self, state: str) -> None:
         for btn in [self.start_stop_btn, self.restart_btn,
-                    self.refresh_btn,    self.settings_btn, self.app_config_btn,
+                    self.refresh_btn, self.run_now_btn, self.settings_btn, self.app_config_btn,
                     self.terminal_btn]:
             btn.configure(state=state)
+
+    def run_one_time_report(self) -> None:
+        if not runtime_config_ready(CONFIG):
+            messagebox.showerror("Config Required", "Please complete CONFIG before running one-time report.")
+            return
+        if not messagebox.askyesno(
+            "Run One-Time Report",
+            "Send reminder report now using current shift detection?"
+        ):
+            return
+
+        def worker() -> None:
+            self._set_buttons_state(tk.DISABLED)
+            self._set_output("Running one-time report now...")
+            code = (
+                "import json, sys\n"
+                f"sys.path.insert(0, {self.project_root!r})\n"
+                "import worklog_reminder as wr\n"
+                "shift = wr.get_auto_shift()\n"
+                "wr.execute_reminder(shift)\n"
+                "print(json.dumps({'ok': True, 'shift': shift}))\n"
+            )
+            rc, out = self._run_python_inline(code)
+            self._set_output(out or "No output from one-time report.")
+
+            if rc != 0:
+                self.root.after(0, lambda: messagebox.showerror("Run Failed", out or "Failed to run one-time report."))
+            else:
+                shift_name = "auto"
+                for line in reversed((out or "").splitlines()):
+                    try:
+                        payload = json.loads(line)
+                        if isinstance(payload, dict) and payload.get("ok"):
+                            shift_name = str(payload.get("shift", "auto")).upper()
+                            break
+                    except json.JSONDecodeError:
+                        continue
+                self.root.after(0, lambda: messagebox.showinfo("Run Complete", f"One-time report sent for shift: {shift_name}"))
+
+            self.root.after(0, self.refresh_status)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _apply_auto_refresh_info_label(self) -> None:
         self._update_auto_refresh_countdown_label()
@@ -1550,6 +1594,14 @@ class SchedulerGui:
 
 
 def main() -> None:
+    if "--schedule" in sys.argv:
+        import worklog_reminder as wr
+        if not wr.validate_config():
+            print("\n❌ Config validation failed. Exiting.\n")
+            sys.exit(1)
+        wr.schedule_reminders()
+        return
+
     root = ctk.CTk()
     SchedulerGui(root)
     root.protocol("WM_DELETE_WINDOW", root.destroy)
@@ -1560,4 +1612,7 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
-        messagebox.showerror("MESDP Scheduler Control", f"Failed to start: {exc}")
+        if "--schedule" in sys.argv:
+            print(f"Failed to start scheduler mode: {exc}")
+        else:
+            messagebox.showerror("MESDP Scheduler Control", f"Failed to start: {exc}")
