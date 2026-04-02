@@ -263,10 +263,10 @@ class SchedulerGui:
         hcard.pack(fill=tk.X, pady=(0, 14))
         hinner = ctk.CTkFrame(hcard, fg_color="transparent")
         hinner.pack(padx=20, pady=14)
-        ctk.CTkLabel(hinner, text="CLL MESDP TICKETING WORKLOG",
+        ctk.CTkLabel(hinner, text="🎫 CLL MESDP TICKETING WORKLOG",
                  text_color=TEXT, font=(FONT_MONO, 22, "bold")).pack()
         ctk.CTkLabel(hinner,
-                     text="Scheduler monitor  ·  worklog reminder  ·  shift snapshot",
+                 text="🧭 Scheduler monitor  ·  🔔 worklog reminder  ·  📸 shift snapshot",
                      text_color=TEXT_MUTED, font=(FONT_UI, 14)).pack(pady=(4, 0))
 
         # Toolbar
