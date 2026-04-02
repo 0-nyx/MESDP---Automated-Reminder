@@ -21,6 +21,7 @@ import smtplib
 import urllib3
 import sys
 import time
+import os
 from html import escape
 try:
     import schedule
@@ -40,15 +41,16 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ─────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────
-SHIFT_REMINDER_TIMES = {
-    "morning": "14:30",   # 2:30 PM
-    "evening": "22:30",   # 10:30 PM
-    "night": "06:30",     # 6:30 AM
-}
-SHIFT_HOURS = {
+SHIFT_SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "shift_settings.json")
+DEFAULT_SHIFT_HOURS = {
     "morning": (7, 15),    # 7:00 AM - 3:00 PM
     "evening": (15, 23),   # 3:00 PM - 11:00 PM
     "night": (23, 7),      # 11:00 PM - 7:00 AM (crosses midnight)
+}
+DEFAULT_REMINDER_OFFSETS = {
+    "morning": 30,
+    "evening": 30,
+    "night": 30,
 }
 REQUEST_TIMEOUT = 10
 API_ROW_LIMIT = 100
@@ -175,24 +177,139 @@ def save_preview_html(file_path: str, html: str) -> bool:
         print(f"❌ Failed to save preview HTML: {e}")
         return False
 
+
+def _format_hour_label(hour: int) -> str:
+    period = "AM" if hour < 12 else "PM"
+    hour_12 = hour % 12 or 12
+    return f"{hour_12}:00 {period}"
+
+
+def _format_hhmm_label(hhmm: str) -> str:
+    try:
+        dt = datetime.strptime(hhmm, "%H:%M")
+        return dt.strftime("%I:%M %p").lstrip("0")
+    except ValueError:
+        return hhmm
+
+
+def _parse_hhmm(value: str) -> Optional[Tuple[int, int]]:
+    try:
+        hour_str, minute_str = value.split(":")
+        hour = int(hour_str)
+        minute = int(minute_str)
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return hour, minute
+    except (ValueError, AttributeError):
+        return None
+    return None
+
+
+def _compute_reminder_time(end_hour: int) -> str:
+    total_minutes = (end_hour * 60 - 30) % (24 * 60)
+    hh = total_minutes // 60
+    mm = total_minutes % 60
+    return f"{hh:02d}:{mm:02d}"
+
+
+def _to_minutes(hhmm: str) -> Optional[int]:
+    parsed = _parse_hhmm(hhmm)
+    if not parsed:
+        return None
+    hh, mm = parsed
+    return hh * 60 + mm
+
+
+def _build_shift_metadata(
+    shift_hours: Dict[str, Tuple[int, int]],
+    shift_times: Dict[str, Tuple[str, str]],
+    reminder_offsets: Dict[str, int],
+) -> Tuple[Dict[str, str], Dict[str, Dict[str, str]]]:
+    reminder_times: Dict[str, str] = {}
+    shift_defs: Dict[str, Dict[str, str]] = {}
+
+    for shift_name in ("morning", "evening", "night"):
+        start_hour, end_hour = shift_hours[shift_name]
+        start_hhmm, end_hhmm = shift_times[shift_name]
+
+        end_minutes = _to_minutes(end_hhmm)
+        offset_minutes = int(reminder_offsets.get(shift_name, 30))
+        if offset_minutes < 0:
+            offset_minutes = 0
+        if offset_minutes > 720:
+            offset_minutes = 720
+
+        if end_minutes is None:
+            reminder_24h = _compute_reminder_time(end_hour)
+        else:
+            reminder_minutes = (end_minutes - offset_minutes) % (24 * 60)
+            reminder_24h = f"{reminder_minutes // 60:02d}:{reminder_minutes % 60:02d}"
+
+        reminder_dt = datetime.strptime(reminder_24h, "%H:%M")
+        reminder_12h = reminder_dt.strftime("%I:%M %p").lstrip("0")
+        label = f"{shift_name.capitalize()} Shift ({_format_hhmm_label(start_hhmm)} – {_format_hhmm_label(end_hhmm)})"
+
+        reminder_times[shift_name] = reminder_24h
+        shift_defs[shift_name] = {
+            "label": label,
+            "reminder": reminder_12h,
+        }
+
+    return reminder_times, shift_defs
+
+
+def load_shift_hours() -> Tuple[Dict[str, Tuple[int, int]], Dict[str, Tuple[str, str]], Dict[str, int]]:
+    """Load shift hours/times/reminder offsets from JSON settings file with fallback to defaults."""
+    shift_hours = dict(DEFAULT_SHIFT_HOURS)
+    shift_times = {
+        name: (f"{vals[0]:02d}:00", f"{vals[1]:02d}:00")
+        for name, vals in shift_hours.items()
+    }
+    reminder_offsets = dict(DEFAULT_REMINDER_OFFSETS)
+    if not os.path.exists(SHIFT_SETTINGS_FILE):
+        return shift_hours, shift_times, reminder_offsets
+
+    try:
+        with open(SHIFT_SETTINGS_FILE, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"⚠️ Failed to read shift settings file: {e}. Using default shift hours.")
+        return shift_hours, shift_times, reminder_offsets
+
+    raw_hours = payload.get("shift_hours", {}) if isinstance(payload, dict) else {}
+    for shift_name in ("morning", "evening", "night"):
+        raw_shift = raw_hours.get(shift_name, {}) if isinstance(raw_hours, dict) else {}
+        if not isinstance(raw_shift, dict):
+            continue
+
+        # New format: start_time/end_time (HH:MM)
+        start_time = raw_shift.get("start_time")
+        end_time = raw_shift.get("end_time")
+        parsed_start = _parse_hhmm(start_time) if isinstance(start_time, str) else None
+        parsed_end = _parse_hhmm(end_time) if isinstance(end_time, str) else None
+        if parsed_start and parsed_end:
+            shift_hours[shift_name] = (parsed_start[0], parsed_end[0])
+            shift_times[shift_name] = (f"{parsed_start[0]:02d}:{parsed_start[1]:02d}", f"{parsed_end[0]:02d}:{parsed_end[1]:02d}")
+            continue
+
+        # Backward-compatible format: start/end integers
+        start = raw_shift.get("start")
+        end = raw_shift.get("end")
+        if isinstance(start, int) and isinstance(end, int) and 0 <= start <= 23 and 0 <= end <= 23:
+            shift_hours[shift_name] = (start, end)
+            shift_times[shift_name] = (f"{start:02d}:00", f"{end:02d}:00")
+
+        raw_offset = raw_shift.get("reminder_minutes")
+        if isinstance(raw_offset, int) and 0 <= raw_offset <= 720:
+            reminder_offsets[shift_name] = raw_offset
+
+    return shift_hours, shift_times, reminder_offsets
+
 # ─────────────────────────────────────────
 # SHIFT DEFINITIONS
 # ─────────────────────────────────────────
 
-SHIFTS = {
-    "morning": {
-        "label":    "Morning Shift (7:00 AM – 3:00 PM)",
-        "reminder": "2:30 PM",
-    },
-    "evening": {
-        "label":    "Evening Shift (3:00 PM – 11:00 PM)",
-        "reminder": "10:30 PM",
-    },
-    "night": {
-        "label":    "Night Shift (11:00 PM – 7:00 AM)",
-        "reminder": "6:30 AM",
-    },
-}
+SHIFT_HOURS, SHIFT_TIMES, SHIFT_REMINDER_OFFSETS = load_shift_hours()
+SHIFT_REMINDER_TIMES, SHIFTS = _build_shift_metadata(SHIFT_HOURS, SHIFT_TIMES, SHIFT_REMINDER_OFFSETS)
 
 
 # ─────────────────────────────────────────

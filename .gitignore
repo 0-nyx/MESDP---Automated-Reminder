@@ -8,3 +8,11 @@ __pycache__/
 
 # Generated previews
 preview_*.html
+
+# Runtime logs
+logs/
+
+# PyInstaller outputs
+build/
+dist/
+*.spec

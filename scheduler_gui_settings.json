@@ -1,0 +1,5 @@
+{
+  "auto_refresh": true,
+  "refresh_interval_seconds": 30,
+  "refresh_profile": "Balanced"
+}
