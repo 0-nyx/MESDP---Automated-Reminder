@@ -5,10 +5,22 @@ import sys
 import threading
 import time
 import tkinter as tk
+import re
+import io
+import traceback
+from contextlib import redirect_stdout
 from datetime import datetime
 from tkinter import messagebox, ttk
+from urllib.parse import urlparse
 
 import customtkinter as ctk  # pyright: ignore[reportMissingImports]
+from config import CONFIG, USER_CONFIG_FILE, save_user_config, runtime_config_ready
+
+try:
+    # Ensure PyInstaller includes worklog_reminder for frozen inline execution.
+    import worklog_reminder as _wr_bundle_hint  # noqa: F401
+except Exception:
+    _wr_bundle_hint = None
 
 
 # ── Design Tokens ─────────────────────────────────────────────────────────────
@@ -64,6 +76,7 @@ class SchedulerGui:
         self.next_auto_refresh_at: float | None = None
         self.current_scheduler_state     = "UNKNOWN"
         self.settings_window             = None
+        self.config_window               = None
         self.latest_tickets: list[dict]  = []
         self._table_resize_job: str | None        = None
         self._title_tooltip: ctk.CTkToplevel | None        = None
@@ -86,14 +99,33 @@ class SchedulerGui:
         self.refresh_interval_var      = tk.StringVar(value="30")
         self.refresh_interval_unit_var = tk.StringVar(value="Seconds")
         self.refresh_profile_var       = tk.StringVar(value="Balanced")
+        self.cfg_mesdp_url_var         = tk.StringVar()
+        self.cfg_mesdp_token_var       = tk.StringVar()
+        self.cfg_smtp_server_var       = tk.StringVar()
+        self.cfg_smtp_port_var         = tk.StringVar()
+        self.cfg_smtp_tls_var          = tk.BooleanVar(value=True)
+        self.cfg_email_sender_var      = tk.StringVar()
+        self.cfg_email_password_var    = tk.StringVar()
+        self.cfg_email_receivers_var   = tk.StringVar()
+        self._has_saved_mesdp_token    = False
+        self._has_saved_email_password = False
+        self.setup_required            = not runtime_config_ready(CONFIG)
+
+        if self.setup_required:
+            # Hide main dashboard until mandatory first-run setup is completed.
+            self.root.withdraw()
 
         self._load_gui_preferences()
         self._configure_styles()
         self._build_ui()
         self.root.bind_all("<Control-comma>", lambda _e: self.open_shift_settings_window())
-        self.refresh_status()
         self._start_process_watchdog()
         self._update_shift_badge()
+        if not self.setup_required:
+            self.refresh_status()
+        else:
+            self._set_output("Please complete first-time setup to start using the app.")
+            self._open_runtime_config_window(force=True)
 
     # ── Persistence ───────────────────────────────────────────────────────────
 
@@ -151,28 +183,53 @@ class SchedulerGui:
 
     # ── Process watchdog ─────────────────────────────────────────────────────
 
+    def _parse_hhmm_minutes(self, value: str) -> int | None:
+        try:
+            hh_str, mm_str = value.split(":")
+            hh, mm = int(hh_str), int(mm_str)
+            if 0 <= hh <= 23 and 0 <= mm <= 59:
+                return hh * 60 + mm
+        except (ValueError, AttributeError):
+            return None
+        return None
+
     def _get_current_shift(self) -> str:
+        # Default shift windows if the settings file is missing/invalid.
+        shift_windows = {
+            "morning": ("07:00", "15:00"),
+            "evening": ("15:00", "23:00"),
+            "night": ("23:00", "07:00"),
+        }
         try:
             with open(self.shift_settings_file, encoding="utf-8") as f:
                 data = json.load(f)
-            hours = data.get("shift_hours", {})
-            now = datetime.now()
-            now_min = now.hour * 60 + now.minute
-            for shift in ("morning", "evening", "night"):
-                raw = hours.get(shift, {})
-                s_h, s_m = map(int, raw.get("start_time", "00:00").split(":"))
-                e_h, e_m = map(int, raw.get("end_time",   "00:00").split(":"))
-                s_min = s_h * 60 + s_m
-                e_min = e_h * 60 + e_m
-                if s_min > e_min:  # crosses midnight
-                    if now_min >= s_min or now_min < e_min:
-                        return shift
-                else:
-                    if s_min <= now_min < e_min:
-                        return shift
-            return "morning"
+            hours = data.get("shift_hours", {}) if isinstance(data, dict) else {}
+            if isinstance(hours, dict):
+                for shift in ("morning", "evening", "night"):
+                    raw = hours.get(shift, {})
+                    if isinstance(raw, dict):
+                        start_time = str(raw.get("start_time", "")).strip()
+                        end_time = str(raw.get("end_time", "")).strip()
+                        if start_time and end_time:
+                            shift_windows[shift] = (start_time, end_time)
         except Exception:
-            return "unknown"
+            pass
+
+        now = datetime.now()
+        now_min = now.hour * 60 + now.minute
+        for shift in ("morning", "evening", "night"):
+            start_raw, end_raw = shift_windows[shift]
+            start_min = self._parse_hhmm_minutes(start_raw)
+            end_min = self._parse_hhmm_minutes(end_raw)
+            if start_min is None or end_min is None:
+                continue
+            if start_min > end_min:  # crosses midnight
+                if now_min >= start_min or now_min < end_min:
+                    return shift
+            else:
+                if start_min <= now_min < end_min:
+                    return shift
+        return "morning"
 
     def _update_shift_badge(self) -> None:
         shift = self._get_current_shift()
@@ -292,17 +349,23 @@ class SchedulerGui:
             fg_color=SURFACE_ALT, hover_color=BORDER_LT,
             border_width=1, border_color=BORDER,
             command=self.open_shift_settings_window, **btn_cfg)
+        self.app_config_btn = ctk.CTkButton(
+            toolbar, text="🔐 CONFIG", text_color=TEXT_MUTED,
+            fg_color=SURFACE_ALT, hover_color=BORDER_LT,
+            border_width=1, border_color=BORDER,
+            command=lambda: self._open_runtime_config_window(force=False), **btn_cfg)
         self.terminal_btn = ctk.CTkButton(
             toolbar, text="💻 TERMINAL", command=self.open_output_window,
             **btn_cfg, **ghost)
 
         for i, btn in enumerate([self.start_stop_btn, self.restart_btn,
-                                   self.refresh_btn, self.settings_btn, self.terminal_btn]):
+                                   self.refresh_btn, self.settings_btn, self.app_config_btn,
+                                   self.terminal_btn]):
             btn.grid(row=0, column=i, padx=(0, 8))
 
-        toolbar.columnconfigure(5, weight=1)
+        toolbar.columnconfigure(6, weight=1)
         meta = ctk.CTkFrame(toolbar, fg_color="transparent")
-        meta.grid(row=0, column=6, sticky="e")
+        meta.grid(row=0, column=7, sticky="e")
 
         self.auto_refresh_info_var = tk.StringVar(value="🔄 Auto Refresh: 30 secs")
         ctk.CTkLabel(meta, textvariable=self.auto_refresh_info_var,
@@ -612,7 +675,16 @@ class SchedulerGui:
 
     def _run_python_inline(self, code_text: str) -> tuple[int, str]:
         if not os.path.exists(self.python_exe):
-            return 1, f"Python not found: {self.python_exe}"
+            # Frozen/installed build may not ship an external python.exe.
+            # Execute trusted internal snippets directly in-process as fallback.
+            buf = io.StringIO()
+            try:
+                ns: dict = {}
+                with redirect_stdout(buf):
+                    exec(code_text, ns, ns)
+                return 0, (buf.getvalue() or "OK").strip()
+            except Exception:
+                return 1, traceback.format_exc()
         cmd = [self.python_exe, "-X", "utf8", "-c", code_text]
         kw: dict = {"cwd": self.project_root, "capture_output": True,
                     "text": True, "encoding": "utf-8", "errors": "replace"}
@@ -684,6 +756,343 @@ class SchedulerGui:
             if sn in self.shift_reminder_vars:
                 self.shift_reminder_vars[sn].set(str(offsets.get(sn, 30)))
         self._refresh_shift_preview(parsed.get("reminders", {}))
+
+    def _open_runtime_config_window(self, force: bool = False) -> None:
+        if self.config_window and self.config_window.winfo_exists():
+            self.config_window.lift(); self.config_window.focus_force(); return
+
+        email_cfg = CONFIG.get("email", {}) if isinstance(CONFIG, dict) else {}
+        mesdp_cfg = CONFIG.get("mesdp", {}) if isinstance(CONFIG, dict) else {}
+
+        self.cfg_mesdp_url_var.set(str(mesdp_cfg.get("base_url", "")))
+        self._has_saved_mesdp_token = bool(str(mesdp_cfg.get("auth_token", "")).strip())
+        self.cfg_mesdp_token_var.set("")
+        self.cfg_smtp_server_var.set(str(email_cfg.get("smtp_server", "")))
+        self.cfg_smtp_port_var.set(str(email_cfg.get("smtp_port", 587)))
+        self.cfg_smtp_tls_var.set(bool(email_cfg.get("use_starttls", True)))
+        self.cfg_email_sender_var.set(str(email_cfg.get("sender", "")))
+        self._has_saved_email_password = bool(str(email_cfg.get("password", "")).strip())
+        self.cfg_email_password_var.set("")
+        existing_receivers = email_cfg.get("recipients", [])
+        if isinstance(existing_receivers, list):
+            self.cfg_email_receivers_var.set(", ".join([str(x).strip() for x in existing_receivers if str(x).strip()]))
+        else:
+            self.cfg_email_receivers_var.set("")
+
+        win = ctk.CTkToplevel(self.root)
+        win.title("First-Time Setup")
+        win.geometry("860x620")
+        win.resizable(False, False)
+        win.configure(fg_color=SURFACE)
+        win.transient(self.root)
+        win.lift()
+        win.focus_force()
+        self.config_window = win
+
+        if force:
+            win.protocol("WM_DELETE_WINDOW", self.root.destroy)
+            messagebox.showinfo(
+                "Setup Required",
+                "Please complete setup first.\n\n"
+                "Required:\n"
+                "- MESDP URL\n"
+                "- MESDP Token\n"
+                "- SMTP Server\n"
+                "- SMTP Port\n"
+                "- Email sender\n"
+                "- Email password\n"
+                "- Receiver email(s)"
+            )
+
+        frame = ctk.CTkFrame(win, fg_color=SURFACE)
+        frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+
+        ctk.CTkLabel(frame, text="APP SETUP", text_color=TEXT_MUTED,
+                     font=(FONT_MONO, 14, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 14))
+
+        lbl = dict(text_color=TEXT_MUTED, font=(FONT_UI, 12, "bold"))
+        ent = dict(width=520, height=36, fg_color=BG, text_color=TEXT,
+                   border_color=BORDER, border_width=1, font=(FONT_UI, 12))
+
+        fields = [
+            ("MESDP Link", self.cfg_mesdp_url_var, False),
+            ("MESDP Token", self.cfg_mesdp_token_var, False),
+            ("SMTP Server", self.cfg_smtp_server_var, False),
+            ("SMTP Port", self.cfg_smtp_port_var, False),
+            ("Email Sender", self.cfg_email_sender_var, False),
+            ("Email Password", self.cfg_email_password_var, True),
+            ("Email Receiver(s) (comma separated)", self.cfg_email_receivers_var, False),
+        ]
+
+        entry_refs: dict[str, ctk.CTkEntry] = {}
+        for i, (title, var, masked) in enumerate(fields, start=1):
+            ctk.CTkLabel(frame, text=title, **lbl).grid(row=i, column=0, sticky="w", pady=(0, 8), padx=(0, 12))
+            e = ctk.CTkEntry(frame, textvariable=var, **ent)
+            if masked:
+                e.configure(show="*")
+            e.grid(row=i, column=1, sticky="w", pady=(0, 8))
+            entry_refs[title] = e
+
+        if self._has_saved_mesdp_token:
+            entry_refs["MESDP Token"].configure(placeholder_text="Saved (leave blank to keep current token)")
+        if self._has_saved_email_password:
+            entry_refs["Email Password"].configure(placeholder_text="Saved (leave blank to keep current password)")
+
+        tls_row = len(fields) + 1
+        ctk.CTkLabel(frame, text="Use STARTTLS", **lbl).grid(
+            row=tls_row, column=0, sticky="w", pady=(0, 8), padx=(0, 12)
+        )
+        ctk.CTkCheckBox(
+            frame,
+            text="Enable STARTTLS",
+            variable=self.cfg_smtp_tls_var,
+            text_color=TEXT,
+            font=(FONT_UI, 12),
+            checkbox_width=18,
+            checkbox_height=18,
+        ).grid(row=tls_row, column=1, sticky="w", pady=(0, 8))
+
+        tip = ctk.CTkLabel(
+            frame,
+            text=f"Config file: {os.path.basename(USER_CONFIG_FILE)}",
+            text_color=TEXT_DIM,
+            font=(FONT_UI, 11)
+        )
+        tip.grid(row=tls_row + 1, column=0, columnspan=2, sticky="w", pady=(8, 12))
+
+        btn_wrap = ctk.CTkFrame(frame, fg_color="transparent")
+        btn_wrap.grid(row=tls_row + 2, column=0, columnspan=2, sticky="w")
+        ctk.CTkButton(
+            btn_wrap,
+            text="TEST CONNECTION",
+            width=170,
+            height=36,
+            fg_color=SURFACE_ALT,
+            hover_color=BORDER_LT,
+            text_color=TEXT,
+            border_width=1,
+            border_color=BORDER,
+            font=(FONT_UI, 11, "bold"),
+            command=self._test_runtime_config,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        ctk.CTkButton(
+            btn_wrap,
+            text="TEST SEND TO RECEIVER",
+            width=190,
+            height=36,
+            fg_color=SURFACE_ALT,
+            hover_color=BORDER_LT,
+            text_color=TEXT,
+            border_width=1,
+            border_color=BORDER,
+            font=(FONT_UI, 11, "bold"),
+            command=self._send_test_email_to_receivers,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        ctk.CTkButton(
+            btn_wrap,
+            text="SAVE CONFIG",
+            width=150,
+            height=36,
+            fg_color=ACCENT,
+            hover_color=ACCENT_HVR,
+            text_color=TEXT,
+            font=(FONT_UI, 11, "bold"),
+            command=lambda: self._save_runtime_config(force=force),
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        if not force:
+            ctk.CTkButton(
+                btn_wrap,
+                text="CLOSE",
+                width=120,
+                height=36,
+                fg_color=SURFACE_ALT,
+                hover_color=BORDER_LT,
+                text_color=TEXT,
+                border_width=1,
+                border_color=BORDER,
+                font=(FONT_UI, 11, "bold"),
+                command=win.destroy,
+            ).pack(side=tk.LEFT)
+
+    def _collect_runtime_config_inputs(self) -> tuple[dict, str | None]:
+        base_url = self.cfg_mesdp_url_var.get().strip()
+        token = self.cfg_mesdp_token_var.get().strip() or str(CONFIG.get("mesdp", {}).get("auth_token", "")).strip()
+        smtp_server = self.cfg_smtp_server_var.get().strip()
+        smtp_port_raw = self.cfg_smtp_port_var.get().strip()
+        use_starttls = bool(self.cfg_smtp_tls_var.get())
+        sender = self.cfg_email_sender_var.get().strip()
+        password = self.cfg_email_password_var.get().strip() or str(CONFIG.get("email", {}).get("password", "")).strip()
+        raw_receivers = self.cfg_email_receivers_var.get().replace(";", ",")
+        receivers = [x.strip() for x in raw_receivers.split(",") if x.strip()]
+
+        if not (base_url and token and smtp_server and smtp_port_raw and sender and password and receivers):
+            return {}, (
+                "Please fill all required fields:\n"
+                "MESDP Link, MESDP Token, SMTP Server, SMTP Port, Email Sender, "
+                "Email Password, and Receiver(s)."
+            )
+
+        try:
+            smtp_port = int(smtp_port_raw)
+        except ValueError:
+            return {}, "SMTP Port must be a valid integer (1-65535)."
+        if not (1 <= smtp_port <= 65535):
+            return {}, "SMTP Port must be between 1 and 65535."
+
+        parsed = urlparse(base_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            return {}, "MESDP Link must be a valid URL (http/https)."
+
+        email_rx = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+        if not email_rx.match(sender):
+            return {}, "Email Sender is not a valid email address."
+        bad = [e for e in receivers if not email_rx.match(e)]
+        if bad:
+            return {}, f"Invalid receiver email(s): {', '.join(bad)}"
+
+        payload = {
+            "mesdp": {
+                "base_url": base_url.rstrip("/"),
+                "auth_token": token,
+            },
+            "email": {
+                "smtp_server": smtp_server,
+                "smtp_port": smtp_port,
+                "use_starttls": use_starttls,
+                "sender": sender,
+                "password": password,
+                "recipients": receivers,
+            },
+        }
+        return payload, None
+
+    def _test_runtime_config(self) -> None:
+        payload, err = self._collect_runtime_config_inputs()
+        if err:
+            messagebox.showerror("Invalid Input", err)
+            return
+
+        mesdp = payload["mesdp"]
+        email = payload["email"]
+        smtp_server = str(email.get("smtp_server", ""))
+        smtp_port = int(email.get("smtp_port", 587))
+        use_starttls = bool(email.get("use_starttls", True))
+
+        code = (
+            "import json, smtplib, requests, urllib3\n"
+            "urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)\n"
+            f"base={mesdp['base_url']!r}\n"
+            f"token={mesdp['auth_token']!r}\n"
+            f"sender={email['sender']!r}\n"
+            f"password={email['password']!r}\n"
+            f"smtp_server={smtp_server!r}\n"
+            f"smtp_port={smtp_port}\n"
+            f"use_starttls={use_starttls}\n"
+            "out={'mesdp':'FAIL','smtp':'FAIL'}\n"
+            "try:\n"
+            "  h={'authtoken': token, 'Accept':'application/vnd.manageengine.sdp.v3+json'}\n"
+            "  p={'input_data':'{\"list_info\":{\"start_index\":1,\"row_count\":1}}'}\n"
+            "  r=requests.get(base + '/api/v3/requests', headers=h, params=p, verify=False, timeout=12)\n"
+            "  out['mesdp']='OK' if r.status_code < 400 else f'HTTP {r.status_code}'\n"
+            "except Exception as e:\n"
+            "  out['mesdp']=str(e)[:140]\n"
+            "try:\n"
+            "  s=smtplib.SMTP(smtp_server, smtp_port, timeout=12)\n"
+            "  if use_starttls: s.starttls()\n"
+            "  s.login(sender, password)\n"
+            "  s.quit()\n"
+            "  out['smtp']='OK'\n"
+            "except Exception as e:\n"
+            "  out['smtp']=str(e)[:140]\n"
+            "print(json.dumps(out))\n"
+        )
+        rc, out = self._run_python_inline(code)
+        if rc != 0:
+            messagebox.showerror("Test Failed", out or "Unknown test error")
+            return
+        parsed = None
+        for line in reversed(out.splitlines()):
+            try:
+                parsed = json.loads(line)
+                break
+            except json.JSONDecodeError:
+                continue
+        if not isinstance(parsed, dict):
+            messagebox.showerror("Test Failed", out or "No response from test runner")
+            return
+
+        mesdp_res = str(parsed.get("mesdp", "FAIL"))
+        smtp_res = str(parsed.get("smtp", "FAIL"))
+        ok = mesdp_res == "OK" and smtp_res == "OK"
+        if ok:
+            messagebox.showinfo("Test Connection", "MESDP: OK\nSMTP: OK")
+        else:
+            messagebox.showwarning("Test Connection", f"MESDP: {mesdp_res}\nSMTP: {smtp_res}")
+
+    def _send_test_email_to_receivers(self) -> None:
+        payload, err = self._collect_runtime_config_inputs()
+        if err:
+            messagebox.showerror("Invalid Input", err)
+            return
+
+        email = payload["email"]
+        smtp_server = str(email.get("smtp_server", ""))
+        smtp_port = int(email.get("smtp_port", 587))
+        use_starttls = bool(email.get("use_starttls", True))
+        recipients = [str(r).strip() for r in email.get("recipients", []) if str(r).strip()]
+        if not recipients:
+            messagebox.showerror("Test Email Failed", "No receiver email configured.")
+            return
+
+        code = (
+            "import smtplib\n"
+            "from email.mime.text import MIMEText\n"
+            f"sender={email['sender']!r}\n"
+            f"password={email['password']!r}\n"
+            f"recipients={recipients!r}\n"
+            f"smtp_server={smtp_server!r}\n"
+            f"smtp_port={smtp_port}\n"
+            f"use_starttls={use_starttls}\n"
+            "msg=MIMEText('This is a test email from CLL MESDP Ticketing Worklog setup.')\n"
+            "msg['Subject']='CLL MESDP Setup Test Email'\n"
+            "msg['From']=sender\n"
+            "msg['To']=', '.join(recipients)\n"
+            "s=smtplib.SMTP(smtp_server, smtp_port, timeout=15)\n"
+            "if use_starttls: s.starttls()\n"
+            "s.login(sender, password)\n"
+            "s.sendmail(sender, recipients, msg.as_string())\n"
+            "s.quit()\n"
+            "print('OK')\n"
+        )
+        rc, out = self._run_python_inline(code)
+        if rc == 0 and "OK" in out:
+            messagebox.showinfo("Test Email", f"Test email sent to: {', '.join(recipients)}")
+        else:
+            messagebox.showerror("Test Email Failed", out or "Failed to send test email.")
+
+    def _save_runtime_config(self, force: bool = False) -> None:
+        payload, err = self._collect_runtime_config_inputs()
+        if err:
+            messagebox.showerror("Invalid Input", err)
+            return
+
+        if not save_user_config(payload):
+            messagebox.showerror("Save Failed", "Unable to write config file.")
+            return
+
+        if self.config_window and self.config_window.winfo_exists():
+            self.config_window.destroy()
+            self.config_window = None
+
+        self._set_output(f"Config saved. Receivers: {', '.join(payload['email']['recipients'])}")
+        if force and self.root.state() == "withdrawn":
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+            self.setup_required = False
+        if force or runtime_config_ready(CONFIG):
+            self.refresh_status()
 
     def open_shift_settings_window(self) -> None:
         if self.settings_window and self.settings_window.winfo_exists():
@@ -1037,7 +1446,8 @@ class SchedulerGui:
 
     def _set_buttons_state(self, state: str) -> None:
         for btn in [self.start_stop_btn, self.restart_btn,
-                    self.refresh_btn,    self.settings_btn]:
+                    self.refresh_btn,    self.settings_btn, self.app_config_btn,
+                    self.terminal_btn]:
             btn.configure(state=state)
 
     def _apply_auto_refresh_info_label(self) -> None:
