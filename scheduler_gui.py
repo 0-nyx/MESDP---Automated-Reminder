@@ -59,6 +59,8 @@ class SchedulerGui:
 
         self.auto_refresh_ms             = 30000
         self.auto_refresh_job            = None
+        self.auto_refresh_countdown_job  = None
+        self.next_auto_refresh_at: float | None = None
         self.current_scheduler_state     = "UNKNOWN"
         self.settings_window             = None
         self.latest_tickets: list[dict]  = []
@@ -276,21 +278,21 @@ class SchedulerGui:
                        border_width=1, border_color=BORDER)
 
         self.start_stop_btn = ctk.CTkButton(
-            toolbar, text="START",
+            toolbar, text="🟢 START",
             fg_color=GOOD_DIM, hover_color="#073a1a", text_color=GOOD,
             border_width=1, border_color=GOOD,
             command=self.toggle_scheduler, **btn_cfg)
         self.restart_btn = ctk.CTkButton(
-            toolbar, text="RESTART", command=self.restart_scheduler, **btn_cfg, **ghost)
+            toolbar, text="🔁 RESTART", command=self.restart_scheduler, **btn_cfg, **ghost)
         self.refresh_btn = ctk.CTkButton(
-            toolbar, text="REFRESH", command=self.refresh_status, **btn_cfg, **ghost)
+            toolbar, text="🔄 REFRESH", command=self.refresh_status, **btn_cfg, **ghost)
         self.settings_btn = ctk.CTkButton(
-            toolbar, text="SETTINGS  ⚙", text_color=TEXT_MUTED,
+            toolbar, text="🛠 SETTINGS", text_color=TEXT_MUTED,
             fg_color=SURFACE_ALT, hover_color=BORDER_LT,
             border_width=1, border_color=BORDER,
             command=self.open_shift_settings_window, **btn_cfg)
         self.terminal_btn = ctk.CTkButton(
-            toolbar, text="TERMINAL  >_", command=self.open_output_window,
+            toolbar, text="💻 TERMINAL", command=self.open_output_window,
             **btn_cfg, **ghost)
 
         for i, btn in enumerate([self.start_stop_btn, self.restart_btn,
@@ -301,13 +303,13 @@ class SchedulerGui:
         meta = ctk.CTkFrame(toolbar, fg_color="transparent")
         meta.grid(row=0, column=6, sticky="e")
 
-        self.last_updated_var = tk.StringVar(value="—")
-        ctk.CTkLabel(meta, textvariable=self.last_updated_var,
-                     text_color=TEXT_DIM, font=(FONT_MONO, 12)).pack(side=tk.RIGHT, padx=(0, 16))
-
-        self.auto_refresh_info_var = tk.StringVar(value="↻  30s  ·  Balanced")
+        self.auto_refresh_info_var = tk.StringVar(value="🔄 Auto Refresh: 30 secs")
         ctk.CTkLabel(meta, textvariable=self.auto_refresh_info_var,
-                     text_color=TEXT_DIM, font=(FONT_MONO, 12)).pack(side=tk.RIGHT)
+                 text_color=TEXT_DIM, font=(FONT_MONO, 12)).pack(anchor="e")
+
+        self.auto_refresh_count_var = tk.StringVar(value="⏳ Count: 00:30")
+        ctk.CTkLabel(meta, textvariable=self.auto_refresh_count_var,
+                 text_color=TEXT_DIM, font=(FONT_MONO, 12)).pack(anchor="e", pady=(2, 0))
 
         # Status cards
         cards = ctk.CTkFrame(outer, fg_color="transparent")
@@ -317,7 +319,7 @@ class SchedulerGui:
 
         sc = self._make_card(cards)
         sc.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
-        ctk.CTkLabel(sc, text="SCHEDULER", text_color=TEXT_MUTED,
+        ctk.CTkLabel(sc, text="🧭 SCHEDULER", text_color=TEXT_MUTED,
                      font=(FONT_MONO, 12, "bold")).pack(anchor="w", padx=16, pady=(14, 6))
         self.scheduler_badge = self._make_badge(sc, "CHECKING…", SURFACE_ALT, TEXT_MUTED)
         self.scheduler_badge.pack(anchor="w", padx=16, pady=(0, 4))
@@ -330,7 +332,7 @@ class SchedulerGui:
 
         snap = self._make_card(cards)
         snap.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
-        ctk.CTkLabel(snap, text="PREVIOUS SHIFT SNAPSHOT", text_color=TEXT_MUTED,
+        ctk.CTkLabel(snap, text="📸 PREVIOUS SHIFT SNAPSHOT", text_color=TEXT_MUTED,
                      font=(FONT_MONO, 12, "bold")).pack(anchor="w", padx=16, pady=(14, 6))
         self.prev_shift_badge = self._make_badge(snap, "LOADING…", SURFACE_ALT, TEXT_MUTED)
         self.prev_shift_badge.pack(anchor="w", padx=16, pady=(0, 4))
@@ -347,7 +349,7 @@ class SchedulerGui:
 
         thead = ctk.CTkFrame(tcard, fg_color="transparent")
         thead.pack(fill=tk.X, padx=16, pady=(14, 10))
-        ctk.CTkLabel(thead, text="PENDING TICKETS", text_color=TEXT_MUTED,
+        ctk.CTkLabel(thead, text="🎫 PENDING TICKETS", text_color=TEXT_MUTED,
                      font=(FONT_MONO, 12, "bold")).pack(side=tk.LEFT)
         ctk.CTkLabel(thead, textvariable=self.table_count_var,
                      text_color=TEXT_DIM, font=(FONT_MONO, 12)).pack(side=tk.RIGHT)
@@ -684,39 +686,43 @@ class SchedulerGui:
 
         c = ctk.CTkFrame(win, fg_color=SURFACE)
         c.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        c.grid_columnconfigure(0, minsize=190)
+        c.grid_columnconfigure(1, minsize=125)
+        c.grid_columnconfigure(2, minsize=125)
+        c.grid_columnconfigure(3, minsize=180)
 
         ctk.CTkLabel(c, text="SHIFT SETTINGS", text_color=TEXT_MUTED,
-                     font=(FONT_MONO, 13, "bold")).grid(
-            row=0, column=0, columnspan=7, sticky="w", pady=(0, 14))
+                     font=(FONT_MONO, 14, "bold")).grid(
+            row=0, column=0, columnspan=7, sticky="w", pady=(0, 12))
 
-        lbl_cfg = dict(text_color=TEXT_MUTED, font=(FONT_UI, 11, "bold"))
+        lbl_cfg = dict(text_color=TEXT_MUTED, font=(FONT_UI, 14, "bold"))
         for col, text in enumerate(["Shift", "Start (HH:MM)", "End (HH:MM)",
                                     "Reminder (min before end)"]):
             ctk.CTkLabel(c, text=text, **lbl_cfg).grid(
-                row=1, column=col, padx=(0, 12), sticky="w")
+                row=1, column=col, padx=(0, 10), pady=(0, 6), sticky="w")
 
         self.shift_hour_vars     = {}
         self.shift_reminder_vars = {}
-        entry_cfg = dict(width=112, height=38, fg_color=BG, text_color=TEXT,
-                 border_color=BORDER, border_width=1, font=(FONT_MONO, 12))
+        entry_cfg = dict(width=104, height=34, fg_color=BG, text_color=TEXT,
+                 border_color=BORDER, border_width=1, font=(FONT_MONO, 14))
 
         for ri, sn in enumerate(("morning", "evening", "night"), start=2):
             ctk.CTkLabel(c, text=sn.capitalize(), text_color=TEXT,
-                         font=(FONT_UI, 12, "bold")).grid(
-                row=ri, column=0, padx=(0, 12), pady=(0, 10), sticky="w")
+                         font=(FONT_UI, 14, "bold")).grid(
+                row=ri, column=0, padx=(0, 10), pady=(0, 8), sticky="w")
             sv, ev, rv = tk.StringVar(), tk.StringVar(), tk.StringVar(value="30")
             for ci, var in enumerate([sv, ev, rv], start=1):
                 e = ctk.CTkEntry(c, textvariable=var, **entry_cfg)
-                e.grid(row=ri, column=ci, padx=(0, 12), pady=(0, 10), sticky="w")
+                e.grid(row=ri, column=ci, padx=(0, 10), pady=(0, 8), sticky="w")
                 e.bind("<KeyRelease>", lambda _e: self._refresh_shift_preview())
             self.shift_hour_vars[sn]     = (sv, ev)
             self.shift_reminder_vars[sn] = rv
 
         btn_row = 5
-        ghost_btn = dict(border_width=1, border_color=BORDER, font=(FONT_UI, 11, "bold"))
+        ghost_btn = dict(border_width=1, border_color=BORDER, font=(FONT_UI, 14, "bold"))
 
         btn_frame = ctk.CTkFrame(c, fg_color="transparent")
-        btn_frame.grid(row=btn_row, column=0, columnspan=7, pady=(6, 0), sticky="w")
+        btn_frame.grid(row=btn_row, column=0, columnspan=7, pady=(4, 0), sticky="w")
         for txt, fg, hvr, cmd in [
             ("SAVE",          ACCENT,      ACCENT_HVR, self.save_shift_hours),
             ("RESET DEFAULT", SURFACE_ALT, BORDER_LT,  self.reset_settings_to_default),
@@ -727,51 +733,52 @@ class SchedulerGui:
                           command=cmd, **ghost_btn).pack(side=tk.LEFT, padx=(0, 8))
 
         ctk.CTkLabel(c, textvariable=self.shift_preview_var,
-                     text_color=TEXT_DIM, font=(FONT_MONO, 11)).grid(
-            row=btn_row + 1, column=0, columnspan=7, sticky="w", pady=(10, 0))
+                     text_color=TEXT_DIM, font=(FONT_MONO, 14)).grid(
+            row=btn_row + 1, column=0, columnspan=7, sticky="w", pady=(8, 0))
 
         sep = ctk.CTkFrame(c, fg_color=BORDER, height=1)
-        sep.grid(row=btn_row + 2, column=0, columnspan=7, sticky="ew", pady=(18, 14))
+        sep.grid(row=btn_row + 2, column=0, columnspan=7, sticky="ew", pady=(14, 10))
 
         ctk.CTkLabel(c, text="AUTO REFRESH", text_color=TEXT_MUTED,
-                     font=(FONT_MONO, 12, "bold")).grid(
-            row=btn_row + 3, column=0, columnspan=7, sticky="w", pady=(0, 12))
+                     font=(FONT_MONO, 14, "bold")).grid(
+            row=btn_row + 3, column=0, columnspan=7, sticky="w", pady=(0, 8))
 
         self.settings_auto_refresh_check = ctk.CTkCheckBox(
             c, text="Enable auto refresh", variable=self.auto_refresh_var,
-            text_color=TEXT, font=(FONT_UI, 12),
+            text_color=TEXT, font=(FONT_UI, 14),
+            checkbox_width=22, checkbox_height=22,
             command=self._toggle_auto_refresh)
         self.settings_auto_refresh_check.grid(
-            row=btn_row + 4, column=0, columnspan=3, padx=(0, 16), pady=(0, 12), sticky="w")
+            row=btn_row + 4, column=0, columnspan=3, padx=(0, 16), pady=(0, 8), sticky="w")
 
         ctk.CTkLabel(c, text="Profile", **lbl_cfg).grid(
-            row=btn_row + 5, column=0, padx=(0, 6), pady=(0, 12), sticky="w")
+            row=btn_row + 5, column=0, padx=(0, 8), pady=(0, 8), sticky="w")
         self.refresh_profile_combo = ctk.CTkComboBox(
             c, values=["Realtime", "Balanced", "Low API Load", "Custom"],
-            width=200, height=36, state="readonly", font=(FONT_UI, 11), dropdown_font=(FONT_UI, 11),
+            width=200, height=34, state="readonly", font=(FONT_UI, 14), dropdown_font=(FONT_UI, 14),
             command=lambda _v: self._on_profile_changed())
-        self.refresh_profile_combo.grid(row=btn_row + 5, column=1, columnspan=2, padx=(0, 16), pady=(0, 12), sticky="w")
+        self.refresh_profile_combo.grid(row=btn_row + 5, column=1, columnspan=2, padx=(0, 16), pady=(0, 8), sticky="w")
         self.refresh_profile_combo.set(self.refresh_profile_var.get())
 
         ctk.CTkLabel(c, text="Interval", **lbl_cfg).grid(
-            row=btn_row + 6, column=0, padx=(0, 6), pady=(0, 12), sticky="w")
+            row=btn_row + 6, column=0, padx=(0, 8), pady=(0, 8), sticky="w")
         self.refresh_interval_combo = ctk.CTkComboBox(
             c, values=["10", "15", "30", "45", "60", "120", "300", "600"],
-            width=112, height=34, font=(FONT_UI, 11), dropdown_font=(FONT_UI, 11),
+            width=104, height=34, font=(FONT_UI, 14), dropdown_font=(FONT_UI, 14),
             command=lambda _v: self._set_profile_custom())
-        self.refresh_interval_combo.grid(row=btn_row + 6, column=1, padx=(0, 8), pady=(0, 12), sticky="w")
+        self.refresh_interval_combo.grid(row=btn_row + 6, column=1, padx=(0, 8), pady=(0, 8), sticky="w")
         self.refresh_interval_combo.set(self.refresh_interval_var.get())
 
         self.refresh_unit_combo = ctk.CTkComboBox(
             c, values=["Seconds", "Minutes", "Hours"],
-            width=150, height=34, state="readonly", font=(FONT_UI, 11), dropdown_font=(FONT_UI, 11),
+            width=138, height=34, state="readonly", font=(FONT_UI, 14), dropdown_font=(FONT_UI, 14),
             command=lambda _v: self._set_profile_custom())
-        self.refresh_unit_combo.grid(row=btn_row + 6, column=2, padx=(0, 16), pady=(0, 12), sticky="w")
+        self.refresh_unit_combo.grid(row=btn_row + 6, column=2, padx=(0, 16), pady=(0, 8), sticky="w")
         self.refresh_unit_combo.set(self.refresh_interval_unit_var.get())
 
-        ctk.CTkButton(c, text="SAVE AUTO REFRESH", width=200, height=38,
+        ctk.CTkButton(c, text="SAVE AUTO REFRESH", width=180, height=36,
                       fg_color=ACCENT, hover_color=ACCENT_HVR, text_color=TEXT,
-                  font=(FONT_UI, 11, "bold"),
+                  font=(FONT_UI, 14, "bold"),
                       command=self.save_auto_refresh_only).grid(
             row=btn_row + 7, column=0, padx=(0, 16), pady=(8, 0), sticky="w")
 
@@ -1016,21 +1023,48 @@ class SchedulerGui:
             btn.configure(state=state)
 
     def _apply_auto_refresh_info_label(self) -> None:
-        s = int(self.auto_refresh_ms / 1000)
-        t = f"{s//3600}h" if s % 3600 == 0 else f"{s//60}m" if s % 60 == 0 else f"{s}s"
-        p = self.refresh_profile_var.get()
-        label = ("↻  " + t + (f"  ·  {p}" if p and p != "Custom" else "")
-                 if self.auto_refresh_var.get() else "↻  off")
-        self.auto_refresh_info_var.set(label)
+        self._update_auto_refresh_countdown_label()
+
+    def _update_auto_refresh_countdown_label(self) -> None:
+        if self.auto_refresh_countdown_job:
+            self.root.after_cancel(self.auto_refresh_countdown_job)
+            self.auto_refresh_countdown_job = None
+
+        if not self.auto_refresh_var.get():
+            self.auto_refresh_info_var.set("🔄 Auto Refresh: Off")
+            self.auto_refresh_count_var.set("⏳ Count: --:--")
+            return
+
+        interval_s = max(1, int(self.auto_refresh_ms / 1000))
+        if self.next_auto_refresh_at is None:
+            remaining = interval_s
+        else:
+            remaining = max(0, int(round(self.next_auto_refresh_at - time.time())))
+
+        hh = remaining // 3600
+        mm = (remaining % 3600) // 60
+        ss = remaining % 60
+        countdown = f"{hh:02d}:{mm:02d}:{ss:02d}" if hh > 0 else f"{mm:02d}:{ss:02d}"
+
+        if interval_s % 3600 == 0:
+            unit_text = f"{interval_s // 3600} hour{'s' if interval_s // 3600 != 1 else ''}"
+        elif interval_s % 60 == 0:
+            unit_text = f"{interval_s // 60} min{'s' if interval_s // 60 != 1 else ''}"
+        else:
+            unit_text = f"{interval_s} sec{'s' if interval_s != 1 else ''}"
+
+        self.auto_refresh_info_var.set(f"🔄 Auto Refresh: {unit_text}")
+        self.auto_refresh_count_var.set(f"⏳ Count: {countdown}")
+        self.auto_refresh_countdown_job = self.root.after(1000, self._update_auto_refresh_countdown_label)
 
     def _set_start_stop_button_for_state(self, state: str) -> None:
         if state == "RUNNING":
             self.start_stop_btn.configure(
-                text="STOP", fg_color=BAD_DIM, hover_color="#5a1010",
+                text="🛑 STOP", fg_color=BAD_DIM, hover_color="#5a1010",
                 text_color=BAD, border_color=BAD)
         else:
             self.start_stop_btn.configure(
-                text="START", fg_color=GOOD_DIM, hover_color="#073a1a",
+                text="🟢 START", fg_color=GOOD_DIM, hover_color="#073a1a",
                 text_color=GOOD, border_color=GOOD)
 
     def _schedule_next_auto_refresh(self) -> None:
@@ -1038,7 +1072,12 @@ class SchedulerGui:
             self.root.after_cancel(self.auto_refresh_job)
             self.auto_refresh_job = None
         if self.auto_refresh_var.get():
+            self.next_auto_refresh_at = time.time() + (self.auto_refresh_ms / 1000)
+            self._update_auto_refresh_countdown_label()
             self.auto_refresh_job = self.root.after(self.auto_refresh_ms, self.refresh_status)
+        else:
+            self.next_auto_refresh_at = None
+            self._update_auto_refresh_countdown_label()
 
     def _toggle_auto_refresh(self) -> None:
         self._save_gui_preferences()
@@ -1048,6 +1087,10 @@ class SchedulerGui:
         elif self.auto_refresh_job:
             self.root.after_cancel(self.auto_refresh_job)
             self.auto_refresh_job = None
+            self.next_auto_refresh_at = None
+        if not self.auto_refresh_var.get() and self.auto_refresh_countdown_job:
+            self.root.after_cancel(self.auto_refresh_countdown_job)
+            self.auto_refresh_countdown_job = None
 
     def toggle_scheduler(self) -> None:
         if self.current_scheduler_state == "RUNNING":
@@ -1074,7 +1117,6 @@ class SchedulerGui:
 
     def _on_refresh_done(self, payload: dict) -> None:
         self._apply_refresh_payload(payload)
-        self.last_updated_var.set(datetime.now().strftime("%H:%M:%S"))
         self._set_buttons_state(tk.NORMAL)
         self._schedule_next_auto_refresh()
 
