@@ -78,7 +78,9 @@ class SchedulerGui:
         self.restart_script      = os.path.join(self.project_root, "restart_scheduler.ps1")
         self.monitor_script      = os.path.join(self.project_root, "monitor_scheduler.ps1")
         self.python_exe          = os.path.join(self.project_root, ".venv", "Scripts", "python.exe")
-        self.shift_settings_file = os.path.join(self.project_root, "shift_settings.json")
+        self.shift_settings_file = os.path.join(
+            os.path.expandvars("%APPDATA%"), "CLL MESDP", "shift_settings.json"
+        )
         self.gui_settings_file   = os.path.join(
             os.path.expandvars("%APPDATA%"), "CLL MESDP", "scheduler_gui_settings.json"
         )
@@ -222,6 +224,14 @@ class SchedulerGui:
             "night": ("23:00", "07:00"),
         }
         try:
+            # Auto-migrate from old location if new location doesn't exist
+            if not os.path.exists(self.shift_settings_file):
+                old_path = os.path.join(self.project_root, "shift_settings.json")
+                if os.path.exists(old_path):
+                    os.makedirs(os.path.dirname(self.shift_settings_file), exist_ok=True)
+                    import shutil
+                    shutil.copy2(old_path, self.shift_settings_file)
+            
             with open(self.shift_settings_file, encoding="utf-8") as f:
                 data = json.load(f)
             hours = data.get("shift_hours", {}) if isinstance(data, dict) else {}
@@ -1605,6 +1615,7 @@ class SchedulerGui:
                               "end_time":   f"{eh:02d}:{em:02d}",
                               "reminder_minutes": rm}
         try:
+            os.makedirs(os.path.dirname(self.shift_settings_file), exist_ok=True)
             with open(self.shift_settings_file, "w", encoding="utf-8") as f:
                 json.dump({"shift_hours": new_hours}, f, indent=2)
         except OSError as e:
