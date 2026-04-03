@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import builtins
 import threading
 import time
 import tkinter as tk
@@ -14,7 +15,16 @@ from tkinter import messagebox, ttk
 from urllib.parse import urlparse
 
 import customtkinter as ctk  # pyright: ignore[reportMissingImports]
-from config import CONFIG, USER_CONFIG_FILE, save_user_config, runtime_config_ready
+from config import (CONFIG, USER_CONFIG_FILE, save_user_config,
+                    runtime_config_ready, export_config_backup, import_config_backup)
+
+try:
+    import pystray  # pyright: ignore[reportMissingImports]
+    from PIL import Image, ImageDraw  # pyright: ignore[reportMissingImports]
+except Exception:
+    pystray = None
+    Image = None
+    ImageDraw = None
 
 try:
     # Ensure PyInstaller includes worklog_reminder for frozen inline execution.
@@ -87,6 +97,8 @@ class SchedulerGui:
         self.output_window: ctk.CTkToplevel | None = None
         self.output: ctk.CTkTextbox | None = None
         self.latest_monitor_output = ""
+        self.tray_icon = None
+        self.tray_thread: threading.Thread | None = None
 
         self.status_filter_var    = tk.StringVar(value="All")
         self.severity_filter_var  = tk.StringVar(value="All")
@@ -107,6 +119,9 @@ class SchedulerGui:
         self.cfg_email_sender_var      = tk.StringVar()
         self.cfg_email_password_var    = tk.StringVar()
         self.cfg_email_receivers_var   = tk.StringVar()
+        self.cfg_email_receiver_input_var = tk.StringVar()
+        self.cfg_email_receivers_list: list[str] = []
+        self.cfg_receiver_listbox: tk.Listbox | None = None
         self._has_saved_mesdp_token    = False
         self._has_saved_email_password = False
         self.setup_required            = not runtime_config_ready(CONFIG)
@@ -118,6 +133,7 @@ class SchedulerGui:
         self._load_gui_preferences()
         self._configure_styles()
         self._build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_main_window_close)
         self.root.bind_all("<Control-comma>", lambda _e: self.open_shift_settings_window())
         self._start_process_watchdog()
         self._update_shift_badge()
@@ -777,9 +793,12 @@ class SchedulerGui:
         self.cfg_email_password_var.set("")
         existing_receivers = email_cfg.get("recipients", [])
         if isinstance(existing_receivers, list):
-            self.cfg_email_receivers_var.set(", ".join([str(x).strip() for x in existing_receivers if str(x).strip()]))
+            self.cfg_email_receivers_list = [str(x).strip() for x in existing_receivers if str(x).strip()]
+            self.cfg_email_receivers_var.set(", ".join(self.cfg_email_receivers_list))
         else:
+            self.cfg_email_receivers_list = []
             self.cfg_email_receivers_var.set("")
+        self.cfg_email_receiver_input_var.set("")
 
         win = ctk.CTkToplevel(self.root)
         win.title("First-Time Setup")
@@ -823,7 +842,6 @@ class SchedulerGui:
             ("SMTP Port", self.cfg_smtp_port_var, False),
             ("Email Sender", self.cfg_email_sender_var, False),
             ("Email Password", self.cfg_email_password_var, True),
-            ("Email Receiver(s) (comma separated)", self.cfg_email_receivers_var, False),
         ]
 
         entry_refs: dict[str, ctk.CTkEntry] = {}
@@ -840,7 +858,108 @@ class SchedulerGui:
         if self._has_saved_email_password:
             entry_refs["Email Password"].configure(placeholder_text="Saved (leave blank to keep current password)")
 
-        tls_row = len(fields) + 1
+        receiver_row = len(fields) + 1
+        ctk.CTkLabel(frame, text="Add Receiver Email", **lbl).grid(
+            row=receiver_row, column=0, sticky="w", pady=(0, 8), padx=(0, 12)
+        )
+        receiver_wrap = ctk.CTkFrame(frame, fg_color="transparent")
+        receiver_wrap.grid(row=receiver_row, column=1, sticky="w", pady=(0, 8))
+
+        receiver_entry = ctk.CTkEntry(
+            receiver_wrap,
+            textvariable=self.cfg_email_receiver_input_var,
+            width=350,
+            height=36,
+            fg_color=BG,
+            text_color=TEXT,
+            border_color=BORDER,
+            border_width=1,
+            font=(FONT_UI, 12),
+            placeholder_text="example@company.com"
+        )
+        receiver_entry.pack(side=tk.LEFT, padx=(0, 8))
+        receiver_entry.bind("<Return>", lambda _e: self._add_receiver_email())
+
+        ctk.CTkButton(
+            receiver_wrap,
+            text="ADD",
+            width=70,
+            height=36,
+            fg_color=SURFACE_ALT,
+            hover_color=BORDER_LT,
+            text_color=TEXT,
+            border_width=1,
+            border_color=BORDER,
+            font=(FONT_UI, 11, "bold"),
+            command=self._add_receiver_email,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        ctk.CTkButton(
+            receiver_wrap,
+            text="IMPORT LIST",
+            width=110,
+            height=36,
+            fg_color=SURFACE_ALT,
+            hover_color=BORDER_LT,
+            text_color=TEXT,
+            border_width=1,
+            border_color=BORDER,
+            font=(FONT_UI, 10, "bold"),
+            command=self._import_receiver_emails,
+        ).pack(side=tk.LEFT)
+
+        list_row = receiver_row + 1
+        ctk.CTkLabel(frame, text="Configured Receiver(s)", **lbl).grid(
+            row=list_row, column=0, sticky="nw", pady=(0, 8), padx=(0, 12)
+        )
+        list_wrap = ctk.CTkFrame(frame, fg_color="transparent")
+        list_wrap.grid(row=list_row, column=1, sticky="w", pady=(0, 8))
+
+        self.cfg_receiver_listbox = tk.Listbox(
+            list_wrap,
+            height=4,
+            width=55,
+            bg=BG,
+            fg=TEXT,
+            selectbackground=ACCENT_HVR,
+            selectforeground=TEXT,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            font=(FONT_UI, 11),
+        )
+        self.cfg_receiver_listbox.pack(side=tk.LEFT)
+
+        ctk.CTkButton(
+            list_wrap,
+            text="REMOVE",
+            width=90,
+            height=30,
+            fg_color=SURFACE_ALT,
+            hover_color=BORDER_LT,
+            text_color=TEXT,
+            border_width=1,
+            border_color=BORDER,
+            font=(FONT_UI, 10, "bold"),
+            command=self._remove_selected_receiver_email,
+        ).pack(side=tk.LEFT, padx=(8, 8), anchor="n")
+
+        ctk.CTkButton(
+            list_wrap,
+            text="CLEAR ALL",
+            width=90,
+            height=30,
+            fg_color=SURFACE_ALT,
+            hover_color=BORDER_LT,
+            text_color=TEXT,
+            border_width=1,
+            border_color=BORDER,
+            font=(FONT_UI, 10, "bold"),
+            command=self._clear_all_receiver_emails,
+        ).pack(side=tk.LEFT, anchor="n")
+
+        self._refresh_receiver_listbox()
+
+        tls_row = list_row + 1
         ctk.CTkLabel(frame, text="Use STARTTLS", **lbl).grid(
             row=tls_row, column=0, sticky="w", pady=(0, 8), padx=(0, 12)
         )
@@ -854,16 +973,8 @@ class SchedulerGui:
             checkbox_height=18,
         ).grid(row=tls_row, column=1, sticky="w", pady=(0, 8))
 
-        tip = ctk.CTkLabel(
-            frame,
-            text=f"Config file: {os.path.basename(USER_CONFIG_FILE)}",
-            text_color=TEXT_DIM,
-            font=(FONT_UI, 11)
-        )
-        tip.grid(row=tls_row + 1, column=0, columnspan=2, sticky="w", pady=(8, 12))
-
         btn_wrap = ctk.CTkFrame(frame, fg_color="transparent")
-        btn_wrap.grid(row=tls_row + 2, column=0, columnspan=2, sticky="w")
+        btn_wrap.grid(row=tls_row + 1, column=0, columnspan=2, sticky="w")
         ctk.CTkButton(
             btn_wrap,
             text="TEST CONNECTION",
@@ -917,6 +1028,82 @@ class SchedulerGui:
                 command=win.destroy,
             ).pack(side=tk.LEFT)
 
+        btn_wrap2 = ctk.CTkFrame(frame, fg_color="transparent")
+        btn_wrap2.grid(row=tls_row + 2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ctk.CTkButton(
+            btn_wrap2,
+            text="💾  BACKUP CONFIG",
+            width=180,
+            height=34,
+            fg_color=SURFACE_ALT,
+            hover_color=BORDER_LT,
+            text_color=TEXT,
+            border_width=1,
+            border_color=BORDER,
+            font=(FONT_UI, 11, "bold"),
+            command=self._backup_config,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        ctk.CTkButton(
+            btn_wrap2,
+            text="📂  RESTORE CONFIG",
+            width=180,
+            height=34,
+            fg_color=SURFACE_ALT,
+            hover_color=BORDER_LT,
+            text_color=TEXT,
+            border_width=1,
+            border_color=BORDER,
+            font=(FONT_UI, 11, "bold"),
+            command=self._restore_config,
+        ).pack(side=tk.LEFT)
+
+    def _refresh_receiver_listbox(self) -> None:
+        if not self.cfg_receiver_listbox:
+            return
+        self.cfg_receiver_listbox.delete(0, tk.END)
+        for email in self.cfg_email_receivers_list:
+            self.cfg_receiver_listbox.insert(tk.END, email)
+        self.cfg_email_receivers_var.set(", ".join(self.cfg_email_receivers_list))
+
+    def _add_receiver_email(self) -> None:
+        raw = self.cfg_email_receiver_input_var.get().strip()
+        if not raw:
+            return
+        email_rx = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+        candidates = [x.strip() for x in re.split(r"[,;\n]+", raw) if x.strip()]
+        invalid = [x for x in candidates if not email_rx.match(x)]
+        if invalid:
+            messagebox.showerror("Invalid Receiver", f"Invalid email(s): {', '.join(invalid)}")
+            return
+        existing_lc = {e.lower() for e in self.cfg_email_receivers_list}
+        for email in candidates:
+            if email.lower() not in existing_lc:
+                self.cfg_email_receivers_list.append(email)
+                existing_lc.add(email.lower())
+        self.cfg_email_receiver_input_var.set("")
+        self._refresh_receiver_listbox()
+
+    def _import_receiver_emails(self) -> None:
+        self._add_receiver_email()
+
+    def _clear_all_receiver_emails(self) -> None:
+        if not self.cfg_email_receivers_list:
+            return
+        if messagebox.askyesno("Clear Receivers", "Remove all receiver emails from the list?"):
+            self.cfg_email_receivers_list = []
+            self._refresh_receiver_listbox()
+
+    def _remove_selected_receiver_email(self) -> None:
+        if not self.cfg_receiver_listbox:
+            return
+        sel = list(self.cfg_receiver_listbox.curselection())
+        if not sel:
+            return
+        for idx in sorted(sel, reverse=True):
+            if 0 <= idx < len(self.cfg_email_receivers_list):
+                del self.cfg_email_receivers_list[idx]
+        self._refresh_receiver_listbox()
+
     def _collect_runtime_config_inputs(self) -> tuple[dict, str | None]:
         base_url = self.cfg_mesdp_url_var.get().strip()
         token = self.cfg_mesdp_token_var.get().strip() or str(CONFIG.get("mesdp", {}).get("auth_token", "")).strip()
@@ -925,8 +1112,10 @@ class SchedulerGui:
         use_starttls = bool(self.cfg_smtp_tls_var.get())
         sender = self.cfg_email_sender_var.get().strip()
         password = self.cfg_email_password_var.get().strip() or str(CONFIG.get("email", {}).get("password", "")).strip()
-        raw_receivers = self.cfg_email_receivers_var.get().replace(";", ",")
-        receivers = [x.strip() for x in raw_receivers.split(",") if x.strip()]
+        pending_input = self.cfg_email_receiver_input_var.get().strip()
+        if pending_input:
+            self._add_receiver_email()
+        receivers = [x.strip() for x in self.cfg_email_receivers_list if x.strip()]
 
         if not (base_url and token and smtp_server and smtp_port_raw and sender and password and receivers):
             return {}, (
@@ -1095,6 +1284,46 @@ class SchedulerGui:
             self.setup_required = False
         if force or runtime_config_ready(CONFIG):
             self.refresh_status()
+
+    def _backup_config(self) -> None:
+        from tkinter import filedialog
+        parent = self.config_window if (self.config_window and self.config_window.winfo_exists()) else self.root
+        path = filedialog.asksaveasfilename(
+            parent=parent,
+            title="Save Config Backup",
+            defaultextension=".json",
+            filetypes=[("JSON backup", "*.json"), ("All files", "*.*")],
+            initialfile="mesdp_config_backup.json",
+        )
+        if not path:
+            return
+        if export_config_backup(path):
+            messagebox.showinfo("Backup Saved", f"Config backed up to:\n{path}", parent=parent)
+        else:
+            messagebox.showerror("Backup Failed", "No config file found to back up.\nSave your config first.", parent=parent)
+
+    def _restore_config(self) -> None:
+        from tkinter import filedialog
+        parent = self.config_window if (self.config_window and self.config_window.winfo_exists()) else self.root
+        path = filedialog.askopenfilename(
+            parent=parent,
+            title="Restore Config from Backup",
+            filetypes=[("JSON backup", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        ok, err, data = import_config_backup(path)
+        if not ok:
+            messagebox.showerror("Restore Failed", f"Could not read backup file:\n{err}", parent=parent)
+            return
+        if not save_user_config(data):
+            messagebox.showerror("Restore Failed", "Could not write config file.", parent=parent)
+            return
+        messagebox.showinfo("Restore Complete", "Configuration restored successfully.\nThe config window will reload.", parent=parent)
+        if self.config_window and self.config_window.winfo_exists():
+            self.config_window.destroy()
+            self.config_window = None
+        self._open_runtime_config_window(force=False)
 
     def open_shift_settings_window(self) -> None:
         if self.settings_window and self.settings_window.winfo_exists():
@@ -1437,6 +1666,176 @@ class SchedulerGui:
             self.output.insert("1.0", text)
             self.output.configure(state=tk.DISABLED)
 
+    def _show_close_options_dialog(self) -> str:
+        result = tk.StringVar(value="close")
+
+        dlg = ctk.CTkToplevel(self.root)
+        dlg.title("Exit Options")
+        dlg.geometry("420x190")
+        dlg.resizable(False, False)
+        dlg.configure(fg_color=SURFACE)
+        dlg.transient(self.root)
+        dlg.grab_set()
+
+        c = ctk.CTkFrame(dlg, fg_color=SURFACE)
+        c.pack(fill=tk.BOTH, expand=True, padx=16, pady=16)
+
+        ctk.CTkLabel(
+            c,
+            text="Choose app action",
+            text_color=TEXT,
+            font=(FONT_UI, 16, "bold"),
+        ).pack(anchor="w", pady=(0, 6))
+
+        ctk.CTkLabel(
+            c,
+            text="Run in background keeps scheduler process and app runtime active.",
+            text_color=TEXT_MUTED,
+            font=(FONT_UI, 12),
+            wraplength=380,
+            justify=tk.LEFT,
+        ).pack(anchor="w", pady=(0, 12))
+
+        btn_cfg = dict(width=122, height=34, font=(FONT_UI, 10, "bold"))
+
+        row = ctk.CTkFrame(c, fg_color="transparent")
+        row.pack(anchor="w")
+
+        ctk.CTkButton(
+            row,
+            text="RUN IN BACKGROUND",
+            fg_color=SURFACE_ALT,
+            hover_color=BORDER_LT,
+            text_color=TEXT,
+            border_width=1,
+            border_color=BORDER,
+            command=lambda: (result.set("background"), dlg.destroy()),
+            **btn_cfg,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        ctk.CTkButton(
+            row,
+            text="RESTART APP",
+            fg_color=SURFACE_ALT,
+            hover_color=BORDER_LT,
+            text_color=TEXT,
+            border_width=1,
+            border_color=BORDER,
+            command=lambda: (result.set("restart"), dlg.destroy()),
+            **btn_cfg,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+
+        ctk.CTkButton(
+            row,
+            text="CLOSE APP",
+            fg_color=BAD_DIM,
+            hover_color="#5a1010",
+            text_color=BAD,
+            border_width=1,
+            border_color=BAD,
+            command=lambda: (result.set("close"), dlg.destroy()),
+            **btn_cfg,
+        ).pack(side=tk.LEFT)
+
+        dlg.protocol("WM_DELETE_WINDOW", lambda: (result.set("close"), dlg.destroy()))
+        dlg.wait_window()
+        return result.get()
+
+    def _notify_user(self, title: str, message: str) -> None:
+        if self.tray_icon:
+            try:
+                self.tray_icon.notify(message, title)
+                return
+            except Exception:
+                pass
+        messagebox.showinfo(title, message)
+
+    def _create_tray_image(self):
+        if Image is None or ImageDraw is None:
+            return None
+        image = Image.new("RGB", (64, 64), "#0d1521")
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle((8, 8, 56, 56), radius=10, fill="#2f80ed")
+        draw.rectangle((18, 20, 46, 44), fill="#ffffff")
+        draw.rectangle((22, 24, 42, 40), fill="#0d1521")
+        return image
+
+    def _open_dashboard_from_tray(self) -> None:
+        self._stop_tray_icon()
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def _exit_from_tray(self) -> None:
+        self._stop_tray_icon()
+        self.root.destroy()
+
+    def _restart_from_tray(self) -> None:
+        self._stop_tray_icon()
+        self._restart_app()
+
+    def _start_tray_icon(self) -> bool:
+        if pystray is None:
+            return False
+        if self.tray_icon is not None:
+            return True
+
+        image = self._create_tray_image()
+        if image is None:
+            return False
+
+        menu = pystray.Menu(
+            pystray.MenuItem("Open Dashboard", lambda _icon, _item: self.root.after(0, self._open_dashboard_from_tray)),
+            pystray.MenuItem("Restart", lambda _icon, _item: self.root.after(0, self._restart_from_tray)),
+            pystray.MenuItem("Exit", lambda _icon, _item: self.root.after(0, self._exit_from_tray)),
+        )
+
+        self.tray_icon = pystray.Icon("mesdp_worklog", image, "CLL MESDP Ticketing Worklog", menu)
+        self.tray_thread = threading.Thread(target=self.tray_icon.run, daemon=True)
+        self.tray_thread.start()
+        return True
+
+    def _stop_tray_icon(self) -> None:
+        if self.tray_icon:
+            try:
+                self.tray_icon.stop()
+            except Exception:
+                pass
+            self.tray_icon = None
+        self.tray_thread = None
+
+    def _restart_app(self) -> None:
+        try:
+            self._stop_tray_icon()
+            if getattr(sys, "frozen", False):
+                subprocess.Popen([sys.executable], cwd=self.project_root)
+            else:
+                subprocess.Popen([sys.executable, os.path.abspath(__file__)], cwd=self.project_root)
+            self.root.destroy()
+        except Exception as exc:
+            messagebox.showerror("Restart Failed", str(exc))
+
+    def _on_main_window_close(self) -> None:
+        action = self._show_close_options_dialog()
+        if action == "background":
+            if not self._start_tray_icon():
+                messagebox.showwarning(
+                    "Tray Not Available",
+                    "System tray is not available in this runtime. App will stay open."
+                )
+                return
+            self.root.withdraw()
+            self._set_output("App is running in background. Reopen from app shortcut to restore UI.")
+            self._notify_user("Running In Background", "CLL MESDP Ticketing Worklog is now running in background.")
+            return
+        if action == "restart":
+            self._notify_user("Restart App", "Restarting application now.")
+            self._restart_app()
+            return
+        self._notify_user("Close App", "Application will close now.")
+        self._stop_tray_icon()
+        self.root.destroy()
+
     def _execute_action(self, script_path: str, action_name: str) -> None:
         def worker() -> None:
             self._set_buttons_state(tk.DISABLED)
@@ -1595,6 +1994,29 @@ class SchedulerGui:
 
 def main() -> None:
     if "--schedule" in sys.argv:
+        original_print = builtins.print
+
+        def safe_print(*args, **kwargs):
+            try:
+                original_print(*args, **kwargs)
+            except UnicodeEncodeError:
+                out_file = kwargs.get("file", sys.stdout)
+                encoding = getattr(out_file, "encoding", None) or "utf-8"
+                safe_args = [str(a).encode(encoding, errors="replace").decode(encoding, errors="replace") for a in args]
+                original_print(*safe_args, **kwargs)
+
+        builtins.print = safe_print
+
+        # Scheduler runs headless with redirected logs on Windows.
+        # Force UTF-8 to avoid cp1252/charmap crashes when printing emoji/text.
+        try:
+            if hasattr(sys.stdout, "reconfigure"):
+                sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+            if hasattr(sys.stderr, "reconfigure"):
+                sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
         import worklog_reminder as wr
         if not wr.validate_config():
             print("\n❌ Config validation failed. Exiting.\n")
@@ -1604,7 +2026,6 @@ def main() -> None:
 
     root = ctk.CTk()
     SchedulerGui(root)
-    root.protocol("WM_DELETE_WINDOW", root.destroy)
     root.mainloop()
 
 
