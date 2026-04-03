@@ -11,6 +11,7 @@ Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64
+SetupIconFile=dist\app_icon.ico
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -22,8 +23,8 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Source: "dist\MESDP Scheduler Control\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
 
 [Icons]
-Name: "{group}\CLL MESDP Ticketing Worklog"; Filename: "{app}\MESDP Scheduler Control.exe"
-Name: "{autodesktop}\CLL MESDP Ticketing Worklog"; Filename: "{app}\MESDP Scheduler Control.exe"; Tasks: desktopicon
+Name: "{group}\CLL MESDP Ticketing Worklog"; Filename: "{app}\MESDP Scheduler Control.exe"; IconFilename: "{app}\_internal\app_icon.ico"
+Name: "{autodesktop}\CLL MESDP Ticketing Worklog"; Filename: "{app}\MESDP Scheduler Control.exe"; IconFilename: "{app}\_internal\app_icon.ico"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\MESDP Scheduler Control.exe"; Description: "Launch CLL MESDP Ticketing Worklog"; Flags: nowait postinstall skipifsilent

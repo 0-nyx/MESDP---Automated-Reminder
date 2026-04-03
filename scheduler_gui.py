@@ -16,7 +16,8 @@ from urllib.parse import urlparse
 
 import customtkinter as ctk  # pyright: ignore[reportMissingImports]
 from config import (CONFIG, USER_CONFIG_FILE, save_user_config,
-                    runtime_config_ready, export_config_backup, import_config_backup)
+                    runtime_config_ready, export_config_backup, import_config_backup,
+                    reload_config_from_disk)
 
 try:
     import pystray  # pyright: ignore[reportMissingImports]
@@ -78,7 +79,9 @@ class SchedulerGui:
         self.monitor_script      = os.path.join(self.project_root, "monitor_scheduler.ps1")
         self.python_exe          = os.path.join(self.project_root, ".venv", "Scripts", "python.exe")
         self.shift_settings_file = os.path.join(self.project_root, "shift_settings.json")
-        self.gui_settings_file   = os.path.join(self.project_root, "scheduler_gui_settings.json")
+        self.gui_settings_file   = os.path.join(
+            os.path.expandvars("%APPDATA%"), "CLL MESDP", "scheduler_gui_settings.json"
+        )
 
         self.auto_refresh_ms             = 30000
         self.auto_refresh_job            = None
@@ -133,6 +136,7 @@ class SchedulerGui:
         self._load_gui_preferences()
         self._configure_styles()
         self._build_ui()
+        self._set_window_icon()
         self.root.protocol("WM_DELETE_WINDOW", self._on_main_window_close)
         self.root.bind_all("<Control-comma>", lambda _e: self.open_shift_settings_window())
         self._start_process_watchdog()
@@ -177,6 +181,7 @@ class SchedulerGui:
             "refresh_profile":          self.refresh_profile_var.get(),
         }
         try:
+            os.makedirs(os.path.dirname(self.gui_settings_file), exist_ok=True)
             with open(self.gui_settings_file, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2)
         except OSError:
@@ -269,10 +274,22 @@ class SchedulerGui:
         threading.Thread(target=_poll, daemon=True).start()
 
     def _quick_check_process(self) -> tuple[int, str]:
-        cmd = ("$r=Get-CimInstance Win32_Process"
-               "|Where-Object{$_.CommandLine -and "
-               "$_.CommandLine -like '*worklog_reminder.py*--schedule*'};"
-               "if($r){'RUNNING'}else{'NOT RUNNING'}")
+        project_root_ps = self.project_root.replace("'", "''")
+        parent_root_ps = os.path.dirname(self.project_root).replace("'", "''")
+        cmd = (
+            f"$projectRoot='{project_root_ps}';"
+            f"$parentRoot='{parent_root_ps}';"
+            "$r=Get-CimInstance Win32_Process|Where-Object{"
+            "$_.CommandLine -and "
+            "("
+            "$_.CommandLine -like '*worklog_reminder.py*--schedule*' -or "
+            "$_.CommandLine -like '*MESDP Scheduler Control.exe*--schedule*'"
+            ") -and ("
+            "$_.CommandLine -like \"*$projectRoot*\" -or "
+            "$_.CommandLine -like \"*$parentRoot*\""
+            ")};"
+            "if($r){'RUNNING'}else{'NOT RUNNING'}"
+        )
         kw: dict = {"capture_output": True, "text": True, "encoding": "utf-8", "errors": "replace"}
         if os.name == "nt":
             si = subprocess.STARTUPINFO()
@@ -356,8 +373,6 @@ class SchedulerGui:
             fg_color=GOOD_DIM, hover_color="#073a1a", text_color=GOOD,
             border_width=1, border_color=GOOD,
             command=self.toggle_scheduler, **btn_cfg)
-        self.restart_btn = ctk.CTkButton(
-            toolbar, text="🔁 RESTART", command=self.restart_scheduler, **btn_cfg, **ghost)
         self.refresh_btn = ctk.CTkButton(
             toolbar, text="🔄 REFRESH", command=self.refresh_status, **btn_cfg, **ghost)
         self.run_now_btn = ctk.CTkButton(
@@ -376,14 +391,14 @@ class SchedulerGui:
             toolbar, text="💻 TERMINAL", command=self.open_output_window,
             **btn_cfg, **ghost)
 
-        for i, btn in enumerate([self.start_stop_btn, self.restart_btn,
+        for i, btn in enumerate([self.start_stop_btn,
                                    self.refresh_btn, self.run_now_btn, self.settings_btn,
                                    self.app_config_btn, self.terminal_btn]):
             btn.grid(row=0, column=i, padx=(0, 8))
 
-        toolbar.columnconfigure(7, weight=1)
+        toolbar.columnconfigure(6, weight=1)
         meta = ctk.CTkFrame(toolbar, fg_color="transparent")
-        meta.grid(row=0, column=8, sticky="e")
+        meta.grid(row=0, column=7, sticky="e")
 
         self.auto_refresh_info_var = tk.StringVar(value="🔄 Auto Refresh: 30 secs")
         ctk.CTkLabel(meta, textvariable=self.auto_refresh_info_var,
@@ -688,21 +703,39 @@ class SchedulerGui:
             si.wShowWindow = 0
             kw["startupinfo"] = si
             kw["creationflags"] = subprocess.CREATE_NO_WINDOW
-        p = subprocess.run(cmd, **kw)
-        return p.returncode, ((p.stdout or "") + ("\n" + p.stderr if p.stderr else "")).strip()
+        try:
+            p = subprocess.run(cmd, timeout=30, **kw)
+            return p.returncode, ((p.stdout or "") + ("\n" + p.stderr if p.stderr else "")).strip()
+        except subprocess.TimeoutExpired:
+            return 1, f"PowerShell timeout while running: {os.path.basename(script_path)}"
+        except Exception as exc:
+            return 1, f"PowerShell execution failed: {exc}"
 
-    def _run_python_inline(self, code_text: str) -> tuple[int, str]:
+    def _run_python_inline(self, code_text: str, timeout_sec: int = 30) -> tuple[int, str]:
         if not os.path.exists(self.python_exe):
             # Frozen/installed build may not ship an external python.exe.
-            # Execute trusted internal snippets directly in-process as fallback.
-            buf = io.StringIO()
-            try:
-                ns: dict = {}
-                with redirect_stdout(buf):
-                    exec(code_text, ns, ns)
-                return 0, (buf.getvalue() or "OK").strip()
-            except Exception:
-                return 1, traceback.format_exc()
+            # Execute trusted internal snippets directly in-process as fallback,
+            # but bound the wait so refresh/action UI cannot freeze indefinitely.
+            result: dict[str, object] = {"rc": 1, "out": "Inline execution did not run."}
+
+            def _runner() -> None:
+                buf = io.StringIO()
+                try:
+                    ns: dict = {}
+                    with redirect_stdout(buf):
+                        exec(code_text, ns, ns)
+                    result["rc"] = 0
+                    result["out"] = (buf.getvalue() or "OK").strip()
+                except Exception:
+                    result["rc"] = 1
+                    result["out"] = traceback.format_exc()
+
+            t = threading.Thread(target=_runner, daemon=True)
+            t.start()
+            t.join(max(1, timeout_sec))
+            if t.is_alive():
+                return 1, f"Inline Python timeout after {timeout_sec}s"
+            return int(result.get("rc", 1)), str(result.get("out", ""))
         cmd = [self.python_exe, "-X", "utf8", "-c", code_text]
         kw: dict = {"cwd": self.project_root, "capture_output": True,
                     "text": True, "encoding": "utf-8", "errors": "replace"}
@@ -712,8 +745,13 @@ class SchedulerGui:
             si.wShowWindow = 0
             kw["startupinfo"] = si
             kw["creationflags"] = subprocess.CREATE_NO_WINDOW
-        p = subprocess.run(cmd, **kw)
-        return p.returncode, ((p.stdout or "") + ("\n" + p.stderr if p.stderr else "")).strip()
+        try:
+            p = subprocess.run(cmd, timeout=max(1, timeout_sec), **kw)
+            return p.returncode, ((p.stdout or "") + ("\n" + p.stderr if p.stderr else "")).strip()
+        except subprocess.TimeoutExpired:
+            return 1, f"Python inline timeout after {timeout_sec}s"
+        except Exception as exc:
+            return 1, f"Python inline execution failed: {exc}"
 
     # ── Interval helpers ──────────────────────────────────────────────────────
 
@@ -801,7 +839,7 @@ class SchedulerGui:
         self.cfg_email_receiver_input_var.set("")
 
         win = ctk.CTkToplevel(self.root)
-        win.title("First-Time Setup")
+        win.title("First-Time Setup" if force else "App Configuration")
         win.geometry("860x620")
         win.resizable(False, False)
         win.configure(fg_color=SURFACE)
@@ -828,7 +866,7 @@ class SchedulerGui:
         frame = ctk.CTkFrame(win, fg_color=SURFACE)
         frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
 
-        ctk.CTkLabel(frame, text="APP SETUP", text_color=TEXT_MUTED,
+        ctk.CTkLabel(frame, text="FIRST-TIME SETUP" if force else "APP CONFIGURATION", text_color=TEXT_MUTED,
                      font=(FONT_MONO, 14, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 14))
 
         lbl = dict(text_color=TEXT_MUTED, font=(FONT_UI, 12, "bold"))
@@ -1013,11 +1051,11 @@ class SchedulerGui:
             command=lambda: self._save_runtime_config(force=force),
         ).pack(side=tk.LEFT, padx=(0, 8))
 
-        if not force:
+        if force:
             ctk.CTkButton(
                 btn_wrap,
-                text="CLOSE",
-                width=120,
+                text="📂  RESTORE FROM BACKUP",
+                width=200,
                 height=36,
                 fg_color=SURFACE_ALT,
                 hover_color=BORDER_LT,
@@ -1025,37 +1063,38 @@ class SchedulerGui:
                 border_width=1,
                 border_color=BORDER,
                 font=(FONT_UI, 11, "bold"),
-                command=win.destroy,
-            ).pack(side=tk.LEFT)
+                command=lambda: self._restore_config_to_form(),
+            ).pack(side=tk.LEFT, padx=(0, 8))
 
-        btn_wrap2 = ctk.CTkFrame(frame, fg_color="transparent")
-        btn_wrap2.grid(row=tls_row + 2, column=0, columnspan=2, sticky="w", pady=(6, 0))
-        ctk.CTkButton(
-            btn_wrap2,
-            text="💾  BACKUP CONFIG",
-            width=180,
-            height=34,
-            fg_color=SURFACE_ALT,
-            hover_color=BORDER_LT,
-            text_color=TEXT,
-            border_width=1,
-            border_color=BORDER,
-            font=(FONT_UI, 11, "bold"),
-            command=self._backup_config,
-        ).pack(side=tk.LEFT, padx=(0, 8))
-        ctk.CTkButton(
-            btn_wrap2,
-            text="📂  RESTORE CONFIG",
-            width=180,
-            height=34,
-            fg_color=SURFACE_ALT,
-            hover_color=BORDER_LT,
-            text_color=TEXT,
-            border_width=1,
-            border_color=BORDER,
-            font=(FONT_UI, 11, "bold"),
-            command=self._restore_config,
-        ).pack(side=tk.LEFT)
+        if not force:
+            btn_wrap2 = ctk.CTkFrame(frame, fg_color="transparent")
+            btn_wrap2.grid(row=tls_row + 2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+            ctk.CTkButton(
+                btn_wrap2,
+                text="💾  BACKUP CONFIG",
+                width=180,
+                height=34,
+                fg_color=SURFACE_ALT,
+                hover_color=BORDER_LT,
+                text_color=TEXT,
+                border_width=1,
+                border_color=BORDER,
+                font=(FONT_UI, 11, "bold"),
+                command=self._backup_config,
+            ).pack(side=tk.LEFT, padx=(0, 8))
+            ctk.CTkButton(
+                btn_wrap2,
+                text="📂  RESTORE CONFIG",
+                width=180,
+                height=34,
+                fg_color=SURFACE_ALT,
+                hover_color=BORDER_LT,
+                text_color=TEXT,
+                border_width=1,
+                border_color=BORDER,
+                font=(FONT_UI, 11, "bold"),
+                command=self._restore_config,
+            ).pack(side=tk.LEFT)
 
     def _refresh_receiver_listbox(self) -> None:
         if not self.cfg_receiver_listbox:
@@ -1261,6 +1300,52 @@ class SchedulerGui:
             messagebox.showinfo("Test Email", f"Test email sent to: {', '.join(recipients)}")
         else:
             messagebox.showerror("Test Email Failed", out or "Failed to send test email.")
+
+    def _restore_config_to_form(self) -> None:
+        """Load a backup config file and auto-populate all form fields."""
+        if not self.config_window or not self.config_window.winfo_exists():
+            return
+        
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            parent=self.config_window,
+            title="Restore Config from Backup",
+            filetypes=[("JSON backup", "*.json"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        
+        ok, err, data = import_config_backup(path)
+        if not ok:
+            messagebox.showerror("Restore Failed", f"Could not read backup file:\n{err}", parent=self.config_window)
+            return
+        
+        # Auto-populate form fields
+        mesdp_cfg = data.get("mesdp", {}) if isinstance(data, dict) else {}
+        email_cfg = data.get("email", {}) if isinstance(data, dict) else {}
+        
+        # MESDP fields
+        self.cfg_mesdp_url_var.set(str(mesdp_cfg.get("base_url", "")))
+        self.cfg_mesdp_token_var.set(str(mesdp_cfg.get("auth_token", "")))
+        self._has_saved_mesdp_token = bool(str(mesdp_cfg.get("auth_token", "")).strip())
+        
+        # Email fields
+        self.cfg_smtp_server_var.set(str(email_cfg.get("smtp_server", "")))
+        self.cfg_smtp_port_var.set(str(email_cfg.get("smtp_port", 587)))
+        self.cfg_smtp_tls_var.set(bool(email_cfg.get("use_starttls", True)))
+        self.cfg_email_sender_var.set(str(email_cfg.get("sender", "")))
+        self.cfg_email_password_var.set(str(email_cfg.get("password", "")))
+        self._has_saved_email_password = bool(str(email_cfg.get("password", "")).strip())
+        
+        # Receivers
+        existing_receivers = email_cfg.get("recipients", [])
+        if isinstance(existing_receivers, list):
+            self.cfg_email_receivers_list = [str(x).strip() for x in existing_receivers if str(x).strip()]
+        else:
+            self.cfg_email_receivers_list = []
+        self._refresh_receiver_listbox()
+        
+        messagebox.showinfo("Config Restored", "Configuration loaded from backup.\nFields populated. Review and save when ready.", parent=self.config_window)
 
     def _save_runtime_config(self, force: bool = False) -> None:
         payload, err = self._collect_runtime_config_inputs()
@@ -1589,6 +1674,8 @@ class SchedulerGui:
         code = (
             "import json, sys\n"
             f"sys.path.insert(0, {self.project_root!r})\n"
+            "import config as cfg\n"
+            "cfg.reload_config_from_disk()\n"
             "import worklog_reminder as wr\n"
             "order=['morning','evening','night']\n"
             "current=wr.get_auto_shift()\n"
@@ -1601,7 +1688,7 @@ class SchedulerGui:
             "print(json.dumps({'current_shift':current,'previous_shift':previous,"
             "'pending_count':pending,'updated_today_count':updated,'total_in_progress':total,'tickets':tickets[:25]}))\n"
         )
-        rc, out = self._run_python_inline(code)
+        rc, out = self._run_python_inline(code, timeout_sec=20)
         if rc != 0:
             return {"error": out or "Failed to pull snapshot."}
         for line in reversed(out.splitlines()):
@@ -1610,6 +1697,19 @@ class SchedulerGui:
             try: return json.loads(line)
             except json.JSONDecodeError: continue
         return {"error": out or "No JSON payload returned."}
+
+    def _fetch_previous_shift_snapshot_with_timeout(self, timeout_sec: int = 12) -> dict:
+        result: dict[str, dict] = {"snapshot": {"error": "Snapshot not available."}}
+
+        def _runner() -> None:
+            result["snapshot"] = self._fetch_previous_shift_snapshot()
+
+        t = threading.Thread(target=_runner, daemon=True)
+        t.start()
+        t.join(max(1, timeout_sec))
+        if t.is_alive():
+            return {"error": f"Snapshot timeout after {timeout_sec}s"}
+        return result["snapshot"]
 
     def _update_ticket_table(self, tickets: list[dict]) -> None:
         self.latest_tickets = tickets
@@ -1750,8 +1850,51 @@ class SchedulerGui:
                 pass
         messagebox.showinfo(title, message)
 
+    def _find_asset(self, filename: str) -> str | None:
+        """Return absolute path to a bundled asset, works both frozen and dev."""
+        candidates = []
+        if getattr(sys, "frozen", False):
+            candidates.append(os.path.join(sys._MEIPASS, filename))
+        candidates.append(os.path.join(self.project_root, filename))
+        candidates.append(os.path.join(self.project_root, "dist", filename))
+        for c in candidates:
+            if os.path.exists(c):
+                return c
+        return None
+
+    def _set_window_icon(self) -> None:
+        """Apply the app icon to the Tk window (titlebar + taskbar)."""
+        try:
+            ico = self._find_asset("app_icon.ico")
+            if ico:
+                self.root.iconbitmap(ico)
+                return
+        except Exception:
+            pass
+        try:
+            if Image is not None:
+                png = self._find_asset("app_icon.png")
+                if png:
+                    from PIL import ImageTk
+                    img = Image.open(png)
+                    photo = ImageTk.PhotoImage(img)
+                    self.root.wm_iconphoto(True, photo)
+                    self._icon_photo_ref = photo  # keep reference
+        except Exception:
+            pass
+
     def _create_tray_image(self):
-        if Image is None or ImageDraw is None:
+        if Image is None:
+            return None
+        png = self._find_asset("app_icon.png")
+        if png:
+            try:
+                img = Image.open(png).convert("RGBA")
+                return img.resize((64, 64), Image.LANCZOS if hasattr(Image, "LANCZOS") else Image.ANTIALIAS)
+            except Exception:
+                pass
+        # Fallback generic icon
+        if ImageDraw is None:
             return None
         image = Image.new("RGB", (64, 64), "#0d1521")
         draw = ImageDraw.Draw(image)
@@ -1838,15 +1981,18 @@ class SchedulerGui:
 
     def _execute_action(self, script_path: str, action_name: str) -> None:
         def worker() -> None:
-            self._set_buttons_state(tk.DISABLED)
-            code, out = self._run_ps(script_path)
-            self._set_output(out or f"No output for {action_name}.")
-            self._set_buttons_state(tk.NORMAL)
-            self.refresh_status()
+            self.root.after(0, lambda: self._set_buttons_state(tk.DISABLED))
+            try:
+                _code, out = self._run_ps(script_path)
+                self.root.after(0, lambda: self._set_output(out or f"No output for {action_name}."))
+            finally:
+                # Always recover UI state even if script execution fails.
+                self.root.after(0, lambda: self._set_buttons_state(tk.NORMAL))
+                self.root.after(0, self.refresh_status)
         threading.Thread(target=worker, daemon=True).start()
 
     def _set_buttons_state(self, state: str) -> None:
-        for btn in [self.start_stop_btn, self.restart_btn,
+        for btn in [self.start_stop_btn,
                     self.refresh_btn, self.run_now_btn, self.settings_btn, self.app_config_btn,
                     self.terminal_btn]:
             btn.configure(state=state)
@@ -1978,11 +2124,25 @@ class SchedulerGui:
         self.prev_shift_badge.configure(text="…", fg_color=SURFACE_ALT, text_color=TEXT_MUTED)
 
         def worker() -> None:
-            mon_code, mon_out = self._run_ps(self.monitor_script)
-            scheduler_state   = self._parse_scheduler_state(mon_out)
-            snapshot          = self._fetch_previous_shift_snapshot()
-            payload = {"monitor_code": mon_code, "monitor_output": mon_out,
-                       "scheduler_state": scheduler_state, "snapshot": snapshot}
+            try:
+                mon_code, mon_out = self._run_ps(self.monitor_script)
+                scheduler_state   = self._parse_scheduler_state(mon_out)
+                # Snapshot pull can be slow when API/network is unstable.
+                # Bound it so UI controls are never stuck disabled.
+                snapshot          = self._fetch_previous_shift_snapshot_with_timeout(12)
+                payload = {
+                    "monitor_code": mon_code,
+                    "monitor_output": mon_out,
+                    "scheduler_state": scheduler_state,
+                    "snapshot": snapshot,
+                }
+            except Exception as exc:
+                payload = {
+                    "monitor_code": 1,
+                    "monitor_output": f"Refresh failed: {exc}",
+                    "scheduler_state": ("UNKNOWN", "Unable to determine scheduler state."),
+                    "snapshot": {"error": str(exc)},
+                }
             self.root.after(0, lambda: self._on_refresh_done(payload))
         threading.Thread(target=worker, daemon=True).start()
 

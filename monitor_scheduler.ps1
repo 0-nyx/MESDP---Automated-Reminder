@@ -5,8 +5,9 @@ param(
 
 $projectRoot = $PSScriptRoot
 $parentRoot = Split-Path $projectRoot -Parent
-$stdoutLog = Join-Path $projectRoot "logs\scheduler.out.log"
-$stderrLog = Join-Path $projectRoot "logs\scheduler.err.log"
+$logDir = Join-Path $env:APPDATA "CLL MESDP\logs"
+$stdoutLog = Join-Path $logDir "scheduler.out.log"
+$stderrLog = Join-Path $logDir "scheduler.err.log"
 
 $running = Get-CimInstance Win32_Process |
     Where-Object {

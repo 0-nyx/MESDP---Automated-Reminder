@@ -8,7 +8,7 @@ $appExe = Join-Path $projectRoot "MESDP Scheduler Control.exe"
 if (-not (Test-Path $appExe)) {
     $appExe = Join-Path $parentRoot "MESDP Scheduler Control.exe"
 }
-$logDir = Join-Path $projectRoot "logs"
+$logDir = Join-Path $env:APPDATA "CLL MESDP\logs"
 $stdoutLog = Join-Path $logDir "scheduler.out.log"
 $stderrLog = Join-Path $logDir "scheduler.err.log"
 
@@ -39,7 +39,7 @@ if ($existing) {
 }
 
 if ((Test-Path $pythonExe) -and (Test-Path $scriptFile)) {
-    $argList = @("-X", "utf8", "`"$scriptFile`"", "--schedule")
+    $argList = @("-X", "utf8", $scriptFile, "--schedule")
     $proc = Start-Process -FilePath $pythonExe `
         -ArgumentList $argList `
         -WorkingDirectory $projectRoot `
