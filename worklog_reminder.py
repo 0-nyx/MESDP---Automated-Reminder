@@ -18,10 +18,12 @@ import argparse
 import requests
 import json
 import smtplib
+import ssl
 import urllib3
 import sys
 import time
 import os
+from email.utils import parseaddr
 from html import escape
 try:
     import schedule
@@ -513,10 +515,10 @@ def build_email(shift_info: Dict, tickets: List[Dict]) -> Tuple[str, str]:
                 <td style="padding:12px; border-bottom:1px solid #e5e7eb; text-align:center; line-height:1.4;">{escape(str(t['title']))}</td>
                 <td style="padding:12px; border-bottom:1px solid #e5e7eb; text-align:center;">{escape(str(t['assigned_l1']))}</td>
                 <td style="padding:12px; border-bottom:1px solid #e5e7eb; text-align:center; font-weight:700;">
-                    <span style="display:inline-block; padding:4px 10px; border-radius:999px; font-size:12px; white-space:nowrap; {severity_style}">{severity}</span>
+                    <span class="pill" style="display:inline-block; padding:3px 7px; border-radius:999px; font-size:11px; white-space:nowrap; {severity_style}">{severity}</span>
                 </td>
                 <td style="padding:12px; border-bottom:1px solid #e5e7eb; text-align:center; font-weight:700;">
-                    <span style="display:inline-block; padding:4px 10px; border-radius:999px; font-size:12px; white-space:nowrap; {status_style}">{ticket_status}</span>
+                    <span class="pill" style="display:inline-block; padding:3px 7px; border-radius:999px; font-size:11px; white-space:nowrap; {status_style}">{ticket_status}</span>
                 </td>
                 <td style="padding:12px; border-bottom:1px solid #e5e7eb; color:#7a1c1c; font-weight:700; text-align:center; white-space:nowrap;">{escape(str(t['last_worklog']))}</td>
             </tr>"""
@@ -527,7 +529,8 @@ def build_email(shift_info: Dict, tickets: List[Dict]) -> Tuple[str, str]:
             <div style="background:#fff7ed; border-left:4px solid #f59e0b; padding:12px; margin-bottom:16px; border-radius:6px;">
                 <p style="margin:0; color:#9a3412; font-size:14px; line-height:1.4;">The tickets below are missing today\'s worklog update. Please update them before shift end to ensure a complete and accurate handover.</p>
             </div>
-            <table role="presentation" style="border-collapse:separate; border-spacing:0; width:100%; font-size:13px; background:#ffffff; border:1px solid #e5e7eb; border-radius:8px; overflow:hidden; table-layout:fixed;">
+            <div class="ticket-table-wrap" style="overflow-x:auto; -webkit-overflow-scrolling:touch; border-radius:8px;">
+            <table class="ticket-table" role="presentation" style="border-collapse:separate; border-spacing:0; width:100%; font-size:13px; background:#ffffff; border:1px solid #e5e7eb; border-radius:8px; overflow:hidden; table-layout:fixed; min-width:520px;">
                 <thead>
                     <tr style="background:#0f4c81; color:#ffffff; font-weight:700;">
                         <th style="padding:12px; border-bottom:1px solid #d1d5db; text-align:center; width:12%;">Ticket ID</th>
@@ -542,6 +545,7 @@ def build_email(shift_info: Dict, tickets: List[Dict]) -> Tuple[str, str]:
                     {rows}
                 </tbody>
             </table>
+            </div>
         </div>
         """
 
@@ -550,18 +554,30 @@ def build_email(shift_info: Dict, tickets: List[Dict]) -> Tuple[str, str]:
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+            @media only screen and (max-width: 600px) {{
+                .email-wrapper {{ padding: 0 4px !important; }}
+                .email-header h1 {{ font-size: 18px !important; }}
+                .email-content {{ padding: 16px !important; }}
+                .ticket-table-wrap {{ overflow-x: auto !important; -webkit-overflow-scrolling: touch; }}
+                .ticket-table {{ font-size: 11px !important; min-width: 520px; }}
+                .ticket-table th,
+                .ticket-table td {{ padding: 8px 6px !important; }}
+                .pill {{ padding: 2px 6px !important; font-size: 10px !important; }}
+            }}
+        </style>
     </head>
     <body style="font-family:'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif; color:#111827; margin:0; padding:0; background:#eef2f7;">
-        <div style="max-width:780px; margin:24px auto; padding:0 12px;">
+        <div class="email-wrapper" style="max-width:780px; margin:24px auto; padding:0 12px;">
             <!-- Header -->
-            <div style="background:linear-gradient(135deg, #0f4c81 0%, #1769aa 100%); padding:28px 22px; text-align:center; border-radius:10px 10px 0 0;">
+            <div class="email-header" style="background:linear-gradient(135deg, #0f4c81 0%, #1769aa 100%); padding:28px 22px; text-align:center; border-radius:10px 10px 0 0;">
                 <h1 style="color:white; margin:0 0 8px; font-size:26px; font-weight:bold;">🔔 CLL MESDP Worklog Update Reminder</h1>
                 <p style="color:white; margin:0; font-size:14px;">{shift_label}</p>
                 <p style="color:rgba(255,255,255,0.9); margin:8px 0 0; font-size:12px;">📅 {today_str}</p>
             </div>
 
             <!-- Content -->
-            <div style="background:white; padding:28px; border-radius:0 0 10px 10px; box-shadow:0 8px 20px rgba(15, 23, 42, 0.08);">
+            <div class="email-content" style="background:white; padding:28px; border-radius:0 0 10px 10px; box-shadow:0 8px 20px rgba(15, 23, 42, 0.08);">
                 <p style="margin:0 0 16px; font-size:16px; color:#1f2937; text-align:left;">Dear L1 Team,</p>
                 
                 <div style="background:#eaf3fb; border-left:4px solid #1769aa; padding:12px; margin-bottom:20px; border-radius:6px; text-align:left;">
@@ -732,17 +748,32 @@ def build_teams_message(shift_info: Dict, tickets: List[Dict]) -> Dict:
 def send_email(subject: str, html_body: str) -> bool:
     """Send email dengan error handling."""
     try:
+        # Sanitise subject to prevent header injection
+        safe_subject = subject.replace("\r", "").replace("\n", " ")
+
+        # Validate recipients — skip any that are blank or malformed
+        valid_recipients = []
+        for addr in CONFIG["email"]["recipients"]:
+            name, email_addr = parseaddr(str(addr))
+            if "@" in email_addr:
+                valid_recipients.append(email_addr)
+            else:
+                print(f"⚠️  Skipping invalid recipient: {addr!r}")
+        if not valid_recipients:
+            print("❌ No valid recipients — aborting email send.")
+            return False
+
         msg            = MIMEMultipart("alternative")
-        msg["Subject"] = subject
+        msg["Subject"] = safe_subject
         msg["From"]    = CONFIG["email"]["sender"]
-        msg["To"]      = ", ".join(CONFIG["email"]["recipients"])
+        msg["To"]      = ", ".join(valid_recipients)
         msg.attach(MIMEText(html_body, "html"))
 
         with smtplib.SMTP(CONFIG["email"]["smtp_server"], CONFIG["email"]["smtp_port"], timeout=REQUEST_TIMEOUT) as server:
             if CONFIG["email"].get("use_starttls", True):
-                server.starttls()
+                server.starttls(context=ssl.create_default_context())
             server.login(CONFIG["email"]["sender"], CONFIG["email"]["password"])
-            server.sendmail(CONFIG["email"]["sender"], CONFIG["email"]["recipients"], msg.as_string())
+            server.sendmail(CONFIG["email"]["sender"], valid_recipients, msg.as_string())
 
         print("✅ Email sent successfully.")
         return True
@@ -764,8 +795,7 @@ def send_teams(payload: Dict) -> bool:
     try:
         resp = requests.post(
             CONFIG["teams"]["webhook_url"],
-            headers={"Content-Type": "application/json"},
-            data=json.dumps(payload),
+            json=payload,
             timeout=REQUEST_TIMEOUT
         )
         if resp.status_code == 200:
@@ -803,6 +833,14 @@ def main():
     parser.add_argument("--preview-file", default="preview_worklog_email.html",
                         help="Path to save generated HTML preview (default: preview_worklog_email.html)")
     args = parser.parse_args()
+
+    # Guard: preview-file must stay within the project directory
+    _base_dir = os.path.abspath(os.path.dirname(__file__))
+    _preview_path = os.path.abspath(os.path.join(_base_dir, args.preview_file))
+    if not _preview_path.startswith(_base_dir + os.sep) and _preview_path != _base_dir:
+        print(f"❌ Invalid --preview-file path: must be inside the project directory.")
+        sys.exit(1)
+    args.preview_file = _preview_path
 
     # Scheduler mode
     if args.schedule:
