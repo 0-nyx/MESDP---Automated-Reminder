@@ -2,7 +2,7 @@
 AppId={{9A4C1B35-5CB5-4F73-9E4E-B1EBA988F4DF}
 AppName=CLL MESDP Ticketing Worklog
 AppVersion=1.0.0
-AppPublisher=CLL
+AppPublisher=Jijoi.Inc
 DefaultDirName={autopf}\CLL\MESDP Scheduler Control
 DefaultGroupName=CLL MESDP Ticketing Worklog
 OutputDir=dist
@@ -10,7 +10,7 @@ OutputBaseFilename=MESDP_Scheduler_Control_Setup
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
-ArchitecturesInstallIn64BitMode=x64
+ArchitecturesInstallIn64BitMode=x64compatible
 SetupIconFile=dist\app_icon.ico
 
 [Languages]

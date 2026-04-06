@@ -35,27 +35,27 @@ except Exception:
 
 
 # ── Design Tokens ─────────────────────────────────────────────────────────────
-BG          = "#080d14"
-SURFACE     = "#0d1521"
-SURFACE_ALT = "#111d2e"
-BORDER      = "#1a2840"
-BORDER_LT   = "#223354"
+BG          = "#071017"
+SURFACE     = "#0e1b26"
+SURFACE_ALT = "#162636"
+BORDER      = "#2a4057"
+BORDER_LT   = "#35546f"
 
-TEXT        = "#c8d8f0"
-TEXT_MUTED  = "#5a7a9e"
-TEXT_DIM    = "#2e4a68"
+TEXT        = "#e3edf7"
+TEXT_MUTED  = "#9fb6cf"
+TEXT_DIM    = "#6d8aa8"
 
-ACCENT      = "#2f80ed"
-ACCENT_HVR  = "#1a6fd4"
-GOOD        = "#16a34a"
-GOOD_DIM    = "#052e16"
-WARN        = "#d97706"
-WARN_DIM    = "#3d2000"
-BAD         = "#dc2626"
-BAD_DIM     = "#3b0c0c"
+ACCENT      = "#1f9d9c"
+ACCENT_HVR  = "#187d7d"
+GOOD        = "#34d399"
+GOOD_DIM    = "#0f3a32"
+WARN        = "#f59e0b"
+WARN_DIM    = "#4f3202"
+BAD         = "#fb7185"
+BAD_DIM     = "#4a1b25"
 
-FONT_MONO   = "Segoe UI"
-FONT_UI     = "Segoe UI"
+FONT_MONO   = "Consolas"
+FONT_UI     = "Bahnschrift"
 FONT_EMOJI  = "Segoe UI Emoji"
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -204,6 +204,76 @@ class SchedulerGui:
                 return base
         return candidates[0]
 
+    def _center_toplevel(self, win: ctk.CTkToplevel, width: int, height: int) -> None:
+        """Center popup windows relative to the main window for consistent placement."""
+        try:
+            self.root.update_idletasks()
+            win.update_idletasks()
+            scr_w = self.root.winfo_screenwidth()
+            scr_h = self.root.winfo_screenheight()
+
+            root_w = self.root.winfo_width()
+            root_h = self.root.winfo_height()
+            root_x = self.root.winfo_rootx()
+            root_y = self.root.winfo_rooty()
+
+            if root_w <= 1 or root_h <= 1:
+                x = max(0, int((scr_w - width) / 2))
+                y = max(0, int((scr_h - height) / 2))
+            else:
+                x = max(0, root_x + int((root_w - width) / 2))
+                y = max(0, root_y + int((root_h - height) / 2))
+
+            # Keep the window fully inside the current monitor bounds.
+            x = min(max(0, x), max(0, scr_w - width))
+            y = min(max(0, y), max(0, scr_h - height))
+
+            win.geometry(f"{width}x{height}+{x}+{y}")
+        except Exception:
+            win.geometry(f"{width}x{height}")
+
+    def _center_existing_toplevel(self, win: ctk.CTkToplevel) -> None:
+        """Center an already rendered toplevel using its actual scaled size."""
+        try:
+            self.root.update_idletasks()
+            win.update_idletasks()
+            scr_w = self.root.winfo_screenwidth()
+            scr_h = self.root.winfo_screenheight()
+
+            w = max(200, win.winfo_width())
+            h = max(120, win.winfo_height())
+
+            # Fit window to screen if DPI scaling makes it larger than visible area.
+            max_w = max(320, scr_w - 40)
+            max_h = max(240, scr_h - 80)
+            fit_w = min(w, max_w)
+            fit_h = min(h, max_h)
+            if fit_w != w or fit_h != h:
+                win.geometry(f"{fit_w}x{fit_h}")
+                win.update_idletasks()
+                w = max(200, win.winfo_width())
+                h = max(120, win.winfo_height())
+
+            root_w = self.root.winfo_width()
+            root_h = self.root.winfo_height()
+            root_x = self.root.winfo_rootx()
+            root_y = self.root.winfo_rooty()
+
+            if root_w <= 1 or root_h <= 1:
+                x = max(0, int((scr_w - w) / 2))
+                y = max(0, int((scr_h - h) / 2))
+            else:
+                x = max(0, root_x + int((root_w - w) / 2))
+                y = max(0, root_y + int((root_h - h) / 2))
+
+            # Keep the window fully inside the current monitor bounds.
+            x = min(max(0, x), max(0, scr_w - w))
+            y = min(max(0, y), max(0, scr_h - h))
+
+            win.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+
     # ── Process watchdog ─────────────────────────────────────────────────────
 
     def _parse_hhmm_minutes(self, value: str) -> int | None:
@@ -265,7 +335,7 @@ class SchedulerGui:
     def _update_shift_badge(self) -> None:
         shift = self._get_current_shift()
         label = shift.upper()
-        self.shift_badge.configure(text=label, fg_color="#0d2240", text_color=ACCENT)
+        self.shift_badge.configure(text=label, fg_color="#153048", text_color="#9fe8e8")
         self.root.after(60_000, self._update_shift_badge)
 
     def _start_process_watchdog(self) -> None:
@@ -324,13 +394,13 @@ class SchedulerGui:
         self._set_start_stop_button_for_state(new_state)
 
     def _make_card(self, parent) -> ctk.CTkFrame:
-        return ctk.CTkFrame(parent, fg_color=SURFACE, corner_radius=6,
+        return ctk.CTkFrame(parent, fg_color=SURFACE, corner_radius=12,
                              border_width=1, border_color=BORDER)
 
     def _make_badge(self, parent, text: str, fg: str, txt: str = TEXT) -> ctk.CTkLabel:
         return ctk.CTkLabel(parent, text=text, fg_color=fg, text_color=txt,
-                             font=(FONT_MONO, 11, "bold"), corner_radius=4,
-                             padx=10, pady=4)
+                             font=(FONT_MONO, 11, "bold"), corner_radius=8,
+                             padx=12, pady=5)
 
     # ── Styles ────────────────────────────────────────────────────────────────
 
@@ -344,14 +414,16 @@ class SchedulerGui:
         style.configure("Tickets.Treeview",
             background=SURFACE, foreground=TEXT,
             fieldbackground=SURFACE, bordercolor=SURFACE,
-            rowheight=40, font=(FONT_UI, 12))
+            rowheight=38, font=(FONT_UI, 12))
         style.configure("Tickets.Treeview.Heading",
-            background=SURFACE_ALT, foreground=TEXT_MUTED,
+            background="#153048", foreground="#d9ecff",
             bordercolor=BORDER, font=(FONT_UI, 11, "bold"),
-            relief="flat", padding=(8, 6))
+            relief="flat", padding=(8, 8))
         style.map("Tickets.Treeview",
-            background=[("selected", "#162540")],
+            background=[("selected", "#1e3b55")],
             foreground=[("selected", TEXT)])
+        style.map("Tickets.Treeview.Heading",
+            background=[("active", "#1c3f5d")])
 
     # ── UI Build ──────────────────────────────────────────────────────────────
 
@@ -364,23 +436,23 @@ class SchedulerGui:
         hcard.pack(fill=tk.X, pady=(0, 14))
         hinner = ctk.CTkFrame(hcard, fg_color="transparent")
         hinner.pack(padx=20, pady=14)
-        ctk.CTkLabel(hinner, text="🎫 CLL MESDP TICKETING WORKLOG",
-             text_color=TEXT, font=(FONT_EMOJI, 22, "bold")).pack()
+        ctk.CTkLabel(hinner, text="🎫 CLL MESDP Ticketing Worklog",
+                     text_color=TEXT, font=(FONT_EMOJI, 24, "bold")).pack()
         ctk.CTkLabel(hinner,
-                 text="🧭 Scheduler monitor  ·  🔔 worklog reminder  ·  📸 shift snapshot",
-                 text_color=TEXT_MUTED, font=(FONT_EMOJI, 14)).pack(pady=(4, 0))
+                     text="🧭 Scheduler monitor  ·  🔔 worklog reminder  ·  📸 shift snapshot",
+                     text_color=TEXT_MUTED, font=(FONT_EMOJI, 13)).pack(pady=(4, 0))
 
         # Toolbar
         toolbar = ctk.CTkFrame(outer, fg_color="transparent")
         toolbar.pack(fill=tk.X, pady=(0, 14))
 
-        btn_cfg = dict(width=124, height=38, corner_radius=4, font=(FONT_UI, 11, "bold"))
+        btn_cfg = dict(width=126, height=40, corner_radius=10, font=(FONT_UI, 11, "bold"))
         ghost   = dict(fg_color=SURFACE_ALT, hover_color=BORDER_LT, text_color=TEXT,
                        border_width=1, border_color=BORDER)
 
         self.start_stop_btn = ctk.CTkButton(
             toolbar, text="🟢 START",
-            fg_color=GOOD_DIM, hover_color="#073a1a", text_color=GOOD,
+            fg_color=GOOD_DIM, hover_color="#125345", text_color=GOOD,
             border_width=1, border_color=GOOD,
             command=self.toggle_scheduler, **btn_cfg)
         self.refresh_btn = ctk.CTkButton(
@@ -412,7 +484,7 @@ class SchedulerGui:
 
         self.auto_refresh_info_var = tk.StringVar(value="🔄 Auto Refresh: 30 secs")
         ctk.CTkLabel(meta, textvariable=self.auto_refresh_info_var,
-             text_color=TEXT_DIM, font=(FONT_EMOJI, 12)).pack(anchor="e")
+               text_color=TEXT_DIM, font=(FONT_EMOJI, 12, "bold")).pack(anchor="e")
 
         self.auto_refresh_count_var = tk.StringVar(value="⏳ Count: 00:30")
         ctk.CTkLabel(meta, textvariable=self.auto_refresh_count_var,
@@ -508,28 +580,36 @@ class SchedulerGui:
                    "severity": "Severity", "status": "Status", "last_worklog": "Last Worklog"}
         widths  = {"ticket_id": 90, "title": 360, "assigned_l1": 130,
                    "severity": 100, "status": 130, "last_worklog": 140}
+        # Relative sizing to keep the table readable without requiring horizontal drag.
+        self.ticket_column_weights = {
+            "ticket_id": 10,
+            "title": 36,
+            "assigned_l1": 18,
+            "severity": 12,
+            "status": 12,
+            "last_worklog": 12,
+        }
         self.ticket_column_widths = widths
 
         self.ticket_table = ttk.Treeview(
             self.table_wrap, columns=cols, show="headings", style="Tickets.Treeview")
+        self.ticket_table.tag_configure("row_even", background=SURFACE, foreground=TEXT)
+        self.ticket_table.tag_configure("row_odd", background="#122233", foreground=TEXT)
+        self.ticket_table.tag_configure("stale", foreground="#ffb4bf")
         for col in cols:
             self.ticket_table.heading(col, text=headers[col])
             anchor = tk.CENTER
-            if col == "title":
-                self.ticket_table.column(col, width=widths[col], minwidth=self.TITLE_MIN_WIDTH,
-                                         stretch=True, anchor=anchor)
-            else:
-                self.ticket_table.column(col, width=widths[col], minwidth=max(70, int(widths[col] * 0.6)),
-                                         stretch=False, anchor=anchor)
+            min_w = self.TITLE_MIN_WIDTH if col == "title" else max(80, int(widths[col] * 0.7))
+            self.ticket_table.column(col, width=widths[col], minwidth=min_w,
+                                     stretch=(col == "title"), anchor=anchor)
 
         sy = ttk.Scrollbar(self.table_wrap, orient=tk.VERTICAL, command=self.ticket_table.yview)
-        sx = ttk.Scrollbar(self.table_wrap, orient=tk.HORIZONTAL, command=self.ticket_table.xview)
-        self.ticket_table.configure(yscrollcommand=sy.set, xscrollcommand=sx.set)
+        self.ticket_table.configure(yscrollcommand=sy.set)
         self.ticket_table.grid(row=0, column=0, sticky="nsew")
         sy.grid(row=0, column=1, sticky="ns", padx=(6, 0))
-        sx.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         self.table_wrap.grid_rowconfigure(0, weight=1)
         self.table_wrap.grid_columnconfigure(0, weight=1)
+        self.ticket_table.bind("<Button-1>", self._block_table_separator_resize, add="+")
         self.ticket_table.bind("<Configure>", self._on_ticket_table_configure)
         self.ticket_table.bind("<ButtonRelease-1>", self._on_ticket_table_mouse_release)
         self.ticket_table.bind("<Motion>",    self._on_ticket_table_hover)
@@ -557,8 +637,8 @@ class SchedulerGui:
         ctk.CTkLabel(c, text="MONITOR OUTPUT", text_color=TEXT_MUTED,
                      font=(FONT_MONO, 10, "bold")).pack(anchor="w", pady=(0, 8))
         self.output = ctk.CTkTextbox(c, font=(FONT_MONO, 11),
-                                     fg_color=BG, text_color="#4a7098",
-                                     border_width=1, border_color=BORDER, corner_radius=4)
+                                     fg_color=BG, text_color="#a9c4e4",
+                                     border_width=1, border_color=BORDER, corner_radius=8)
         self.output.pack(fill=tk.BOTH, expand=True)
         self.output.configure(state=tk.NORMAL)
         self.output.delete("1.0", tk.END)
@@ -582,7 +662,7 @@ class SchedulerGui:
 
     def _apply_ticket_table_layout(self) -> None:
         self._table_resize_job = None
-        self._resize_title_column()
+        self._resize_ticket_columns()
         if self.latest_tickets:
             self._render_filtered_ticket_rows()
 
@@ -593,17 +673,35 @@ class SchedulerGui:
         except Exception:
             pass
 
-    def _resize_title_column(self) -> None:
+    def _block_table_separator_resize(self, event):
+        """Prevent manual column-separator dragging that causes unstable expansion."""
+        try:
+            if self.ticket_table.identify_region(event.x, event.y) == "separator":
+                return "break"
+        except Exception:
+            return None
+        return None
+
+    def _resize_ticket_columns(self) -> None:
         if self._user_resized_columns:
             return
         avail = self.table_wrap.winfo_width()
         if avail <= 1:
             return
-        fixed  = sum(self.ticket_column_widths[c] for c in
-                     ("ticket_id", "assigned_l1", "severity", "status", "last_worklog"))
-        target = max(self.TITLE_MIN_WIDTH, avail - fixed - 32)
-        self.ticket_table.column("title", width=target,
-                                  minwidth=self.TITLE_MIN_WIDTH, stretch=True)
+        usable = max(640, avail - 12)
+        total_weight = sum(self.ticket_column_weights.values())
+        for col, w in self.ticket_column_weights.items():
+            width = int((usable * w) / total_weight)
+            if col == "title":
+                width = max(self.TITLE_MIN_WIDTH, min(self.TITLE_MAX_WIDTH, width))
+            else:
+                min_w = max(80, int(self.ticket_column_widths[col] * 0.7))
+                width = max(min_w, width)
+            self.ticket_table.column(col, width=width, stretch=(col == "title"))
+
+    def _resize_title_column(self) -> None:
+        """Backward-compatible alias for older call sites."""
+        self._resize_ticket_columns()
 
     def _truncate_title_for_current_width(self, text: str) -> str:
         px     = int(self.ticket_table.column("title", "width"))
@@ -686,17 +784,22 @@ class SchedulerGui:
         self._full_title_by_item.clear()
         for row in self.ticket_table.get_children():
             self.ticket_table.delete(row)
-        for item in tickets:
+        for idx, item in enumerate(tickets):
             raw   = str(item.get("title", "N/A"))
             short = self._truncate_title_for_current_width(raw)
+            last_worklog = str(item.get("last_worklog", "N/A"))
+            row_tag = "row_even" if idx % 2 == 0 else "row_odd"
+            tags = [row_tag]
+            if last_worklog.strip().lower() in {"no record", "n/a", "na"}:
+                tags.append("stale")
             rid   = self.ticket_table.insert("", tk.END, values=(
                 item.get("ticket_id",    "N/A"),
                 short,
                 item.get("assigned_l1",  "N/A"),
                 item.get("severity",     "N/A"),
                 item.get("status",       "N/A"),
-                item.get("last_worklog", "N/A"),
-            ))
+                last_worklog,
+            ), tags=tuple(tags))
             self._full_title_by_item[rid] = raw
 
     # ── PowerShell / Python runners ───────────────────────────────────────────
@@ -850,9 +953,10 @@ class SchedulerGui:
 
         win = ctk.CTkToplevel(self.root)
         win.title("First-Time Setup" if force else "App Configuration")
-        win.geometry("860x620")
+        cfg_width, cfg_height = 860, 640
+        self._center_toplevel(win, cfg_width, cfg_height)
         win.resizable(False, False)
-        win.configure(fg_color=SURFACE)
+        win.configure(fg_color=BG)
         win.transient(self.root)
         win.lift()
         win.focus_force()
@@ -873,15 +977,20 @@ class SchedulerGui:
                 "- Receiver email(s)"
             )
 
-        frame = ctk.CTkFrame(win, fg_color=SURFACE)
+        frame = ctk.CTkFrame(win, fg_color=SURFACE, corner_radius=12,
+                             border_width=1, border_color=BORDER)
         frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
 
-        ctk.CTkLabel(frame, text="FIRST-TIME SETUP" if force else "APP CONFIGURATION", text_color=TEXT_MUTED,
-                     font=(FONT_MONO, 14, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 14))
+        ctk.CTkLabel(frame, text="FIRST-TIME SETUP" if force else "APP CONFIGURATION", text_color=TEXT,
+                     font=(FONT_UI, 18, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(4, 2))
+        ctk.CTkLabel(frame,
+                     text="Configure MESDP and SMTP details to enable reminders.",
+                     text_color=TEXT_MUTED, font=(FONT_UI, 12)).grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(0, 16))
 
         lbl = dict(text_color=TEXT_MUTED, font=(FONT_UI, 12, "bold"))
-        ent = dict(width=520, height=36, fg_color=BG, text_color=TEXT,
-                   border_color=BORDER, border_width=1, font=(FONT_UI, 12))
+        ent = dict(width=530, height=38, fg_color=SURFACE_ALT, text_color=TEXT,
+                   border_color=BORDER, border_width=1, font=(FONT_UI, 12), corner_radius=8)
 
         fields = [
             ("MESDP Link", self.cfg_mesdp_url_var, False),
@@ -893,7 +1002,7 @@ class SchedulerGui:
         ]
 
         entry_refs: dict[str, ctk.CTkEntry] = {}
-        for i, (title, var, masked) in enumerate(fields, start=1):
+        for i, (title, var, masked) in enumerate(fields, start=2):
             ctk.CTkLabel(frame, text=title, **lbl).grid(row=i, column=0, sticky="w", pady=(0, 8), padx=(0, 12))
             e = ctk.CTkEntry(frame, textvariable=var, **ent)
             if masked:
@@ -906,7 +1015,7 @@ class SchedulerGui:
         if self._has_saved_email_password:
             entry_refs["Email Password"].configure(placeholder_text="Saved (leave blank to keep current password)")
 
-        receiver_row = len(fields) + 1
+        receiver_row = len(fields) + 2
         ctk.CTkLabel(frame, text="Add Receiver Email", **lbl).grid(
             row=receiver_row, column=0, sticky="w", pady=(0, 8), padx=(0, 12)
         )
@@ -917,12 +1026,13 @@ class SchedulerGui:
             receiver_wrap,
             textvariable=self.cfg_email_receiver_input_var,
             width=350,
-            height=36,
-            fg_color=BG,
+            height=38,
+            fg_color=SURFACE_ALT,
             text_color=TEXT,
             border_color=BORDER,
             border_width=1,
             font=(FONT_UI, 12),
+            corner_radius=8,
             placeholder_text="example@company.com"
         )
         receiver_entry.pack(side=tk.LEFT, padx=(0, 8))
@@ -932,12 +1042,13 @@ class SchedulerGui:
             receiver_wrap,
             text="ADD",
             width=70,
-            height=36,
+            height=38,
             fg_color=SURFACE_ALT,
             hover_color=BORDER_LT,
             text_color=TEXT,
             border_width=1,
             border_color=BORDER,
+            corner_radius=8,
             font=(FONT_UI, 11, "bold"),
             command=self._add_receiver_email,
         ).pack(side=tk.LEFT, padx=(0, 8))
@@ -946,12 +1057,13 @@ class SchedulerGui:
             receiver_wrap,
             text="IMPORT LIST",
             width=110,
-            height=36,
+            height=38,
             fg_color=SURFACE_ALT,
             hover_color=BORDER_LT,
             text_color=TEXT,
             border_width=1,
             border_color=BORDER,
+            corner_radius=8,
             font=(FONT_UI, 10, "bold"),
             command=self._import_receiver_emails,
         ).pack(side=tk.LEFT)
@@ -967,7 +1079,7 @@ class SchedulerGui:
             list_wrap,
             height=4,
             width=55,
-            bg=BG,
+            bg=SURFACE_ALT,
             fg=TEXT,
             selectbackground=ACCENT_HVR,
             selectforeground=TEXT,
@@ -981,12 +1093,13 @@ class SchedulerGui:
             list_wrap,
             text="REMOVE",
             width=90,
-            height=30,
+            height=32,
             fg_color=SURFACE_ALT,
             hover_color=BORDER_LT,
             text_color=TEXT,
             border_width=1,
             border_color=BORDER,
+            corner_radius=8,
             font=(FONT_UI, 10, "bold"),
             command=self._remove_selected_receiver_email,
         ).pack(side=tk.LEFT, padx=(8, 8), anchor="n")
@@ -995,12 +1108,13 @@ class SchedulerGui:
             list_wrap,
             text="CLEAR ALL",
             width=90,
-            height=30,
+            height=32,
             fg_color=SURFACE_ALT,
             hover_color=BORDER_LT,
             text_color=TEXT,
             border_width=1,
             border_color=BORDER,
+            corner_radius=8,
             font=(FONT_UI, 10, "bold"),
             command=self._clear_all_receiver_emails,
         ).pack(side=tk.LEFT, anchor="n")
@@ -1027,12 +1141,13 @@ class SchedulerGui:
             btn_wrap,
             text="TEST CONNECTION",
             width=170,
-            height=36,
+            height=38,
             fg_color=SURFACE_ALT,
             hover_color=BORDER_LT,
             text_color=TEXT,
             border_width=1,
             border_color=BORDER,
+            corner_radius=8,
             font=(FONT_UI, 11, "bold"),
             command=self._test_runtime_config,
         ).pack(side=tk.LEFT, padx=(0, 8))
@@ -1040,12 +1155,13 @@ class SchedulerGui:
             btn_wrap,
             text="TEST SEND TO RECEIVER",
             width=190,
-            height=36,
+            height=38,
             fg_color=SURFACE_ALT,
             hover_color=BORDER_LT,
             text_color=TEXT,
             border_width=1,
             border_color=BORDER,
+            corner_radius=8,
             font=(FONT_UI, 11, "bold"),
             command=self._send_test_email_to_receivers,
         ).pack(side=tk.LEFT, padx=(0, 8))
@@ -1053,10 +1169,11 @@ class SchedulerGui:
             btn_wrap,
             text="SAVE CONFIG",
             width=150,
-            height=36,
+            height=38,
             fg_color=ACCENT,
             hover_color=ACCENT_HVR,
             text_color=TEXT,
+            corner_radius=8,
             font=(FONT_UI, 11, "bold"),
             command=lambda: self._save_runtime_config(force=force),
         ).pack(side=tk.LEFT, padx=(0, 8))
@@ -1066,12 +1183,13 @@ class SchedulerGui:
                 btn_wrap,
                 text="📂  RESTORE FROM BACKUP",
                 width=200,
-                height=36,
+                height=38,
                 fg_color=SURFACE_ALT,
                 hover_color=BORDER_LT,
                 text_color=TEXT,
                 border_width=1,
                 border_color=BORDER,
+                corner_radius=8,
                 font=(FONT_UI, 11, "bold"),
                 command=lambda: self._restore_config_to_form(),
             ).pack(side=tk.LEFT, padx=(0, 8))
@@ -1089,6 +1207,7 @@ class SchedulerGui:
                 text_color=TEXT,
                 border_width=1,
                 border_color=BORDER,
+                corner_radius=8,
                 font=(FONT_UI, 11, "bold"),
                 command=self._backup_config,
             ).pack(side=tk.LEFT, padx=(0, 8))
@@ -1102,9 +1221,13 @@ class SchedulerGui:
                 text_color=TEXT,
                 border_width=1,
                 border_color=BORDER,
+                corner_radius=8,
                 font=(FONT_UI, 11, "bold"),
                 command=self._restore_config,
             ).pack(side=tk.LEFT)
+
+            # Recenter after widgets are laid out (handles DPI scaling correctly).
+            win.after(30, lambda: self._center_existing_toplevel(win))
 
     def _refresh_receiver_listbox(self) -> None:
         if not self.cfg_receiver_listbox:
@@ -1426,37 +1549,43 @@ class SchedulerGui:
 
         win = ctk.CTkToplevel(self.root)
         win.title("Shift Settings  (Ctrl+,)")
-        win.geometry("920x620")
+        settings_width, settings_height = 860, 630
+        self._center_toplevel(win, settings_width, settings_height)
         win.resizable(False, False)
-        win.configure(fg_color=SURFACE)
+        win.configure(fg_color=BG)
         win.transient(self.root)
         win.lift()
         win.focus_force()
         self.settings_window = win
 
-        c = ctk.CTkFrame(win, fg_color=SURFACE)
+        c = ctk.CTkFrame(win, fg_color=SURFACE, corner_radius=12,
+                 border_width=1, border_color=BORDER)
         c.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
         c.grid_columnconfigure(0, minsize=190)
         c.grid_columnconfigure(1, minsize=125)
         c.grid_columnconfigure(2, minsize=125)
         c.grid_columnconfigure(3, minsize=180)
 
-        ctk.CTkLabel(c, text="SHIFT SETTINGS", text_color=TEXT_MUTED,
-                     font=(FONT_MONO, 14, "bold")).grid(
-            row=0, column=0, columnspan=7, sticky="w", pady=(0, 12))
+        ctk.CTkLabel(c, text="SHIFT SETTINGS", text_color=TEXT,
+                     font=(FONT_UI, 18, "bold")).grid(
+            row=0, column=0, columnspan=7, sticky="w", pady=(4, 2))
+        ctk.CTkLabel(c,
+                     text="Adjust shift windows and auto-refresh behavior.",
+                     text_color=TEXT_MUTED, font=(FONT_UI, 12)).grid(
+            row=1, column=0, columnspan=7, sticky="w", pady=(0, 12))
 
         lbl_cfg = dict(text_color=TEXT_MUTED, font=(FONT_UI, 14, "bold"))
         for col, text in enumerate(["Shift", "Start (HH:MM)", "End (HH:MM)",
                                     "Reminder (min before end)"]):
             ctk.CTkLabel(c, text=text, **lbl_cfg).grid(
-                row=1, column=col, padx=(0, 10), pady=(0, 6), sticky="w")
+                row=2, column=col, padx=(0, 10), pady=(0, 6), sticky="w")
 
         self.shift_hour_vars     = {}
         self.shift_reminder_vars = {}
-        entry_cfg = dict(width=104, height=34, fg_color=BG, text_color=TEXT,
-                 border_color=BORDER, border_width=1, font=(FONT_MONO, 14))
+        entry_cfg = dict(width=104, height=36, fg_color=SURFACE_ALT, text_color=TEXT,
+                         border_color=BORDER, border_width=1, corner_radius=8, font=(FONT_MONO, 14))
 
-        for ri, sn in enumerate(("morning", "evening", "night"), start=2):
+        for ri, sn in enumerate(("morning", "evening", "night"), start=3):
             ctk.CTkLabel(c, text=sn.capitalize(), text_color=TEXT,
                          font=(FONT_UI, 14, "bold")).grid(
                 row=ri, column=0, padx=(0, 10), pady=(0, 8), sticky="w")
@@ -1468,7 +1597,7 @@ class SchedulerGui:
             self.shift_hour_vars[sn]     = (sv, ev)
             self.shift_reminder_vars[sn] = rv
 
-        btn_row = 5
+        btn_row = 6
         ghost_btn = dict(border_width=1, border_color=BORDER, font=(FONT_UI, 14, "bold"))
 
         btn_frame = ctk.CTkFrame(c, fg_color="transparent")
@@ -1479,7 +1608,7 @@ class SchedulerGui:
             ("CLOSE",         SURFACE_ALT, BORDER_LT,  win.destroy),
         ]:
             ctk.CTkButton(btn_frame, text=txt, width=160, height=38,
-                          fg_color=fg, hover_color=hvr, text_color=TEXT,
+                          fg_color=fg, hover_color=hvr, text_color=TEXT, corner_radius=8,
                           command=cmd, **ghost_btn).pack(side=tk.LEFT, padx=(0, 8))
 
         ctk.CTkLabel(c, textvariable=self.shift_preview_var,
@@ -1528,13 +1657,16 @@ class SchedulerGui:
 
         ctk.CTkButton(c, text="SAVE AUTO REFRESH", width=180, height=36,
                       fg_color=ACCENT, hover_color=ACCENT_HVR, text_color=TEXT,
-                  font=(FONT_UI, 14, "bold"),
+                      corner_radius=8, font=(FONT_UI, 14, "bold"),
                       command=self.save_auto_refresh_only).grid(
             row=btn_row + 7, column=0, padx=(0, 16), pady=(8, 0), sticky="w")
 
         self._load_shift_hours_into_form()
         self._apply_profile_to_interval(set_custom_if_manual=False)
         self._apply_auto_refresh_info_label()
+
+        # Recenter after widgets are laid out (handles DPI scaling correctly).
+        win.after(30, lambda: self._center_existing_toplevel(win))
 
     def _set_profile_custom(self) -> None:
         self.refresh_profile_var.set("Custom")
@@ -1725,7 +1857,7 @@ class SchedulerGui:
     def _update_ticket_table(self, tickets: list[dict]) -> None:
         self.latest_tickets = tickets
         self._refresh_filter_options(tickets)
-        self._resize_title_column()
+        self._resize_ticket_columns()
         self._render_filtered_ticket_rows()
 
     def _apply_refresh_payload(self, payload: dict) -> None:
@@ -2088,11 +2220,11 @@ class SchedulerGui:
     def _set_start_stop_button_for_state(self, state: str) -> None:
         if state == "RUNNING":
             self.start_stop_btn.configure(
-                text="🛑 STOP", fg_color=BAD_DIM, hover_color="#5a1010",
+                text="🛑 STOP", fg_color=BAD_DIM, hover_color="#5b1e2c",
                 text_color=BAD, border_color=BAD)
         else:
             self.start_stop_btn.configure(
-                text="🟢 START", fg_color=GOOD_DIM, hover_color="#073a1a",
+                text="🟢 START", fg_color=GOOD_DIM, hover_color="#125345",
                 text_color=GOOD, border_color=GOOD)
 
     def _schedule_next_auto_refresh(self) -> None:

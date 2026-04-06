@@ -485,8 +485,8 @@ def build_email(shift_info: Dict, tickets: List[Dict]) -> Tuple[str, str]:
 
     if not tickets:
         status_block = """
-        <div style="background:#e8f5e9; border-left:4px solid #4caf50; padding:16px; margin:20px 0; border-radius:6px; text-align:center;">
-            <p style="color:#2e7d32; font-size:16px; margin:0;"><strong>✅ All assigned tickets have up-to-date worklogs for today.</strong> Thank you for maintaining excellent handover quality.</p>
+        <div style="background:#eefbf4; border:1px solid #b9e7cb; border-left:5px solid #2f9e63; padding:16px; margin:22px 0; border-radius:10px; text-align:center;">
+            <p style="color:#1f6e44; font-size:16px; margin:0; line-height:1.5;"><strong>✅ All assigned tickets have up-to-date worklogs for today.</strong> Thank you for maintaining excellent handover quality.</p>
         </div>
         """
     else:
@@ -511,34 +511,34 @@ def build_email(shift_info: Dict, tickets: List[Dict]) -> Tuple[str, str]:
 
             rows += f"""
             <tr style="background:{row_bg};">
-                <td style="padding:12px; border-bottom:1px solid #e5e7eb; font-weight:700; color:#0f4c81; white-space:nowrap; text-align:center;">{escape(str(t['ticket_id']))}</td>
-                <td style="padding:12px; border-bottom:1px solid #e5e7eb; text-align:center; line-height:1.4;">{escape(str(t['title']))}</td>
-                <td style="padding:12px; border-bottom:1px solid #e5e7eb; text-align:center;">{escape(str(t['assigned_l1']))}</td>
-                <td style="padding:12px; border-bottom:1px solid #e5e7eb; text-align:center; font-weight:700;">
+                <td style="padding:12px; border-bottom:1px solid #dde5ee; font-weight:700; color:#123955; white-space:nowrap; text-align:center;">{escape(str(t['ticket_id']))}</td>
+                <td style="padding:12px; border-bottom:1px solid #dde5ee; text-align:center; line-height:1.45; color:#23374d;">{escape(str(t['title']))}</td>
+                <td style="padding:12px; border-bottom:1px solid #dde5ee; text-align:center; color:#2f3e4f;">{escape(str(t['assigned_l1']))}</td>
+                <td style="padding:12px; border-bottom:1px solid #dde5ee; text-align:center; font-weight:700;">
                     <span class="pill" style="display:inline-block; padding:3px 7px; border-radius:999px; font-size:11px; white-space:nowrap; {severity_style}">{severity}</span>
                 </td>
-                <td style="padding:12px; border-bottom:1px solid #e5e7eb; text-align:center; font-weight:700;">
+                <td style="padding:12px; border-bottom:1px solid #dde5ee; text-align:center; font-weight:700;">
                     <span class="pill" style="display:inline-block; padding:3px 7px; border-radius:999px; font-size:11px; white-space:nowrap; {status_style}">{ticket_status}</span>
                 </td>
-                <td style="padding:12px; border-bottom:1px solid #e5e7eb; color:#7a1c1c; font-weight:700; text-align:center; white-space:nowrap;">{escape(str(t['last_worklog']))}</td>
+                <td style="padding:12px; border-bottom:1px solid #dde5ee; color:#8c2f2b; font-weight:700; text-align:center; white-space:nowrap;">{escape(str(t['last_worklog']))}</td>
             </tr>"""
 
         status_block = f"""
         <div style="margin:22px 0 10px; text-align:left;">
-            <p style="font-size:16px; color:#a12622; margin:0 0 12px; font-weight:700;">⚠️ {len(tickets)} Ticket(s) Pending Worklog Update</p>
-            <div style="background:#fff7ed; border-left:4px solid #f59e0b; padding:12px; margin-bottom:16px; border-radius:6px;">
-                <p style="margin:0; color:#9a3412; font-size:14px; line-height:1.4;">The tickets below are missing today\'s worklog update. Please update them before shift end to ensure a complete and accurate handover.</p>
+            <p style="font-size:18px; color:#a04617; margin:0 0 12px; font-weight:700;">⚠️ {len(tickets)} Ticket(s) Pending Worklog Update</p>
+            <div style="background:#fff5e9; border:1px solid #ffd9ad; border-left:5px solid #f28f3b; padding:12px; margin-bottom:18px; border-radius:10px;">
+                <p style="margin:0; color:#8a3b0f; font-size:14px; line-height:1.45;">The tickets below are missing today\'s worklog update. Please update them before shift end to ensure a complete and accurate handover.</p>
             </div>
-            <div class="ticket-table-wrap" style="overflow-x:auto; -webkit-overflow-scrolling:touch; border-radius:8px;">
-            <table class="ticket-table" role="presentation" style="border-collapse:separate; border-spacing:0; width:100%; font-size:13px; background:#ffffff; border:1px solid #e5e7eb; border-radius:8px; overflow:hidden; table-layout:fixed; min-width:520px;">
+            <div class="ticket-table-wrap" style="overflow-x:auto; -webkit-overflow-scrolling:touch; border-radius:12px;">
+            <table class="ticket-table" role="presentation" style="border-collapse:separate; border-spacing:0; width:100%; font-size:13px; background:#ffffff; border:1px solid #cfd8e3; border-radius:12px; overflow:hidden; table-layout:fixed; min-width:520px;">
                 <thead>
-                    <tr style="background:#0f4c81; color:#ffffff; font-weight:700;">
-                        <th style="padding:12px; border-bottom:1px solid #d1d5db; text-align:center; width:12%;">Ticket ID</th>
-                        <th style="padding:12px; border-bottom:1px solid #d1d5db; text-align:center; width:31%;">Title</th>
-                        <th style="padding:12px; border-bottom:1px solid #d1d5db; text-align:center; width:18%;">Assigned L1</th>
-                        <th style="padding:12px; border-bottom:1px solid #d1d5db; text-align:center; width:12%;">Severity</th>
-                        <th style="padding:12px; border-bottom:1px solid #d1d5db; text-align:center; width:13%;">Status</th>
-                        <th style="padding:12px; border-bottom:1px solid #d1d5db; text-align:center; width:14%;">Last Updated</th>
+                    <tr style="background:#123955; color:#ffffff; font-weight:700;">
+                        <th style="padding:12px; border-bottom:1px solid #0f2f46; text-align:center; width:12%;">Ticket ID</th>
+                        <th style="padding:12px; border-bottom:1px solid #0f2f46; text-align:center; width:31%;">Title</th>
+                        <th style="padding:12px; border-bottom:1px solid #0f2f46; text-align:center; width:18%;">Assigned L1</th>
+                        <th style="padding:12px; border-bottom:1px solid #0f2f46; text-align:center; width:12%;">Severity</th>
+                        <th style="padding:12px; border-bottom:1px solid #0f2f46; text-align:center; width:13%;">Status</th>
+                        <th style="padding:12px; border-bottom:1px solid #0f2f46; text-align:center; width:14%;">Last Updated</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -557,7 +557,7 @@ def build_email(shift_info: Dict, tickets: List[Dict]) -> Tuple[str, str]:
         <style>
             @media only screen and (max-width: 600px) {{
                 .email-wrapper {{ padding: 0 4px !important; }}
-                .email-header h1 {{ font-size: 18px !important; }}
+                .email-header h1 {{ font-size: 20px !important; }}
                 .email-content {{ padding: 16px !important; }}
                 .ticket-table-wrap {{ overflow-x: auto !important; -webkit-overflow-scrolling: touch; }}
                 .ticket-table {{ font-size: 11px !important; min-width: 520px; }}
@@ -567,28 +567,29 @@ def build_email(shift_info: Dict, tickets: List[Dict]) -> Tuple[str, str]:
             }}
         </style>
     </head>
-    <body style="font-family:'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif; color:#111827; margin:0; padding:0; background:#eef2f7;">
-        <div class="email-wrapper" style="max-width:780px; margin:24px auto; padding:0 12px;">
+    <body style="font-family:'Trebuchet MS', 'Segoe UI', Tahoma, sans-serif; color:#132236; margin:0; padding:0; background:#f3f6f9; background-image:radial-gradient(circle at 20% -20%, #dce9f7 0, rgba(220,233,247,0) 45%), radial-gradient(circle at 105% 0, #dff2ec 0, rgba(223,242,236,0) 40%);">
+        <div class="email-wrapper" style="max-width:790px; margin:28px auto; padding:0 12px;">
             <!-- Header -->
-            <div class="email-header" style="background:linear-gradient(135deg, #0f4c81 0%, #1769aa 100%); padding:28px 22px; text-align:center; border-radius:10px 10px 0 0;">
-                <h1 style="color:white; margin:0 0 8px; font-size:26px; font-weight:bold;">🔔 CLL MESDP Worklog Update Reminder</h1>
-                <p style="color:white; margin:0; font-size:14px;">{shift_label}</p>
+            <div class="email-header" style="background:linear-gradient(145deg, #0b2f4a 0%, #10507a 58%, #1f7a8c 100%); padding:30px 22px 26px; text-align:center; border-radius:14px 14px 0 0; border-bottom:4px solid #f28f3b; box-shadow:0 10px 24px rgba(11, 47, 74, 0.18);">
+                <p style="color:#f8d9b6; margin:0 0 10px; font-size:11px; letter-spacing:1.4px; font-weight:700; text-transform:uppercase;">Operations Notice</p>
+                <h1 style="color:white; margin:0 0 8px; font-size:30px; font-weight:700; letter-spacing:0.2px;">🔔 CLL MESDP Worklog Update Reminder</h1>
+                <p style="color:#e8f4ff; margin:0; font-size:14px;">{shift_label}</p>
                 <p style="color:rgba(255,255,255,0.9); margin:8px 0 0; font-size:12px;">📅 {today_str}</p>
             </div>
 
             <!-- Content -->
-            <div class="email-content" style="background:white; padding:28px; border-radius:0 0 10px 10px; box-shadow:0 8px 20px rgba(15, 23, 42, 0.08);">
-                <p style="margin:0 0 16px; font-size:16px; color:#1f2937; text-align:left;">Dear L1 Team,</p>
+            <div class="email-content" style="background:#ffffff; padding:28px; border-radius:0 0 14px 14px; border:1px solid #d5e0ea; border-top:none; box-shadow:0 12px 28px rgba(18, 57, 85, 0.12);">
+                <p style="margin:0 0 16px; font-size:16px; color:#213547; text-align:left;">Dear L1 Team,</p>
                 
-                <div style="background:#eaf3fb; border-left:4px solid #1769aa; padding:12px; margin-bottom:20px; border-radius:6px; text-align:left;">
-                    <p style="margin:0; color:#123f63; font-size:14px; line-height:1.45;"><strong>⏰ Action required:</strong> Update all assigned tickets with the latest worklog details, current status, and next action before the shift ends.</p>
+                <div style="background:#eef7ff; border:1px solid #c8def3; border-left:5px solid #1f7a8c; padding:13px; margin-bottom:22px; border-radius:10px; text-align:left;">
+                    <p style="margin:0; color:#174f69; font-size:14px; line-height:1.5;"><strong>⏰ Action required:</strong> Update all assigned tickets with the latest worklog details, current status, and next action before the shift ends.</p>
                 </div>
 
                 {status_block}
 
                 <!-- Footer -->
-                <div style="background:#f8fafc; border-top:1px solid #e5e7eb; margin-top:24px; padding:16px; border-radius:6px; text-align:center;">
-                    <p style="margin:0; font-size:12px; color:#666;">
+                <div style="background:#f2f7fb; border:1px solid #d9e5f0; margin-top:24px; padding:16px; border-radius:10px; text-align:center;">
+                    <p style="margin:0; font-size:12px; color:#4b6075; line-height:1.5;">
                         ⚙️ This is an automated notification from the CLL MESDP Worklog Update Reminder.<br>
                         Please do not reply to this email.
                     </p>
