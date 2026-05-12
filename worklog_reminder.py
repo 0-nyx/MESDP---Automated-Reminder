@@ -37,6 +37,13 @@ from datetime import datetime, date
 from typing import List, Dict, Tuple, Optional
 from config import CONFIG
 
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
 # Disable SSL warning because SDP uses a self-signed cert on port 8443
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -56,6 +63,7 @@ DEFAULT_REMINDER_OFFSETS = {
 }
 REQUEST_TIMEOUT = 10
 API_ROW_LIMIT = 100
+WORKLOG_ROW_LIMIT = 100
 
 
 # ─────────────────────────────────────────
@@ -359,15 +367,19 @@ def get_inprogress_summary() -> Optional[Dict]:
 
             if response.status_code != 200:
                 print(f"[ERROR] API Error {response.status_code}: {response.text}")
-                return []
+                return None
         except requests.exceptions.Timeout:
             print("[ERROR] API Timeout: MESDP service took too long to respond")
-            return []
+            return None
         except requests.exceptions.RequestException as e:
             print(f"[ERROR] API Connection Error: {e}")
-            return []
+            return None
 
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError as e:
+            print(f"[ERROR] API returned invalid JSON: {e}")
+            return None
         requests_list = data.get("requests", [])
         list_info = data.get("list_info", {})
 
@@ -445,45 +457,60 @@ def get_inprogress_tickets() -> Optional[List[Dict]]:
     """Fetch pending 'In Progress' tickets (worklog not updated today)."""
     summary = get_inprogress_summary()
     if summary is None:
-        return []
+        return None
     return summary.get("tickets", [])
 
 
 def get_last_worklog_date(request_id: int, auth_token: str, base_url: str) -> Optional[date]:
     """Get latest worklog date for a specific ticket."""
-    url     = f"{base_url}/api/v3/requests/{request_id}/worklogs"
+    latest_timestamp_ms = get_last_worklog_timestamp_ms(request_id, auth_token, base_url)
+    if latest_timestamp_ms:
+        return datetime.fromtimestamp(latest_timestamp_ms / 1000).date()
+    return None
+
+
+def get_request_worklogs(request_id: int, auth_token: str, base_url: str) -> Optional[List[Dict]]:
+    """Fetch all worklogs for a request across API pages."""
+    url = f"{base_url}/api/v3/requests/{request_id}/worklogs"
     headers = {"authtoken": auth_token}
 
     try:
-        response = requests.get(url, headers=headers, verify=False, timeout=REQUEST_TIMEOUT)
-        if response.status_code != 200:
-            return None
+        worklogs = []
+        start_index = 1
 
-        worklogs = response.json().get("worklogs", [])
+        while True:
+            input_data = {
+                "list_info": {
+                    "row_count": WORKLOG_ROW_LIMIT,
+                    "start_index": start_index,
+                }
+            }
+            response = requests.get(
+                url,
+                headers=headers,
+                params={"input_data": json.dumps(input_data)},
+                verify=False,
+                timeout=REQUEST_TIMEOUT,
+            )
+            if response.status_code != 200:
+                return None
+
+            data = response.json()
+            page_worklogs = data.get("worklogs", [])
+            if not isinstance(page_worklogs, list) or not page_worklogs:
+                break
+
+            worklogs.extend(page_worklogs)
+            list_info = data.get("list_info", {})
+            if not isinstance(list_info, dict) or not list_info.get("has_more_rows", False):
+                break
+
+            start_index += WORKLOG_ROW_LIMIT
+
         if not worklogs:
             return None
 
-        def get_timestamp_value(w, field):
-            try:
-                val = w.get(field, {}).get("value", 0)
-                return int(val) if val else 0
-            except (ValueError, TypeError, AttributeError):
-                return 0
-
-        def get_timestamp(w):
-            return max(
-                get_timestamp_value(w, "updated_time"),
-                get_timestamp_value(w, "created_time"),
-                get_timestamp_value(w, "start_time"),
-                get_timestamp_value(w, "end_time"),
-            )
-
-        latest = max(worklogs, key=get_timestamp)
-        timestamp_ms = get_timestamp(latest)
-
-        if timestamp_ms:
-            return datetime.fromtimestamp(timestamp_ms / 1000).date()
-
+        return worklogs
     except requests.exceptions.Timeout:
         print(f"⚠️ Worklog API timeout for #{request_id}")
     except requests.exceptions.RequestException as e:
@@ -492,6 +519,61 @@ def get_last_worklog_date(request_id: int, auth_token: str, base_url: str) -> Op
         print(f"⚠️ Worklog check error for #{request_id}: {e}")
 
     return None
+
+
+def get_worklog_timestamp_value(obj: Dict, field: str) -> int:
+    """Extract ManageEngine timestamp milliseconds from a raw worklog field."""
+    try:
+        raw = obj.get(field, {})
+        val = raw.get("value", 0) if isinstance(raw, dict) else raw
+        return int(val) if val else 0
+    except (ValueError, TypeError, AttributeError):
+        return 0
+
+
+def get_worklog_timestamp(w: Dict) -> int:
+    return max(
+        get_worklog_timestamp_value(w, "updated_time"),
+        get_worklog_timestamp_value(w, "created_time"),
+        get_worklog_timestamp_value(w, "start_time"),
+        get_worklog_timestamp_value(w, "end_time"),
+    )
+
+
+def get_last_worklog_timestamp_ms(request_id: int, auth_token: str, base_url: str) -> int:
+    worklogs = get_request_worklogs(request_id, auth_token, base_url)
+    if not worklogs:
+        return 0
+    latest_worklog = max(worklogs, key=get_worklog_timestamp)
+    return get_worklog_timestamp(latest_worklog)
+
+
+def debug_worklog_ticket(request_id: int) -> bool:
+    """Print raw timestamp summary for one request's worklogs."""
+    base_url = CONFIG["mesdp"]["base_url"]
+    auth_token = CONFIG["mesdp"]["auth_token"]
+    worklogs = get_request_worklogs(request_id, auth_token, base_url)
+    if worklogs is None:
+        print(f"❌ Failed to fetch worklogs for #{request_id}")
+        return False
+
+    print(f"\nWorklog debug for #{request_id}")
+    print(f"Total worklogs returned by API: {len(worklogs)}")
+    if not worklogs:
+        return True
+
+    sorted_worklogs = sorted(worklogs, key=get_worklog_timestamp, reverse=True)
+    for idx, worklog in enumerate(sorted_worklogs[:5], start=1):
+        timestamp_ms = get_worklog_timestamp(worklog)
+        timestamp_text = (
+            datetime.fromtimestamp(timestamp_ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
+            if timestamp_ms
+            else "No timestamp"
+        )
+        owner = worklog.get("owner") or worklog.get("technician") or worklog.get("created_by") or {}
+        owner_name = owner.get("name", "N/A") if isinstance(owner, dict) else str(owner)
+        print(f"{idx}. {timestamp_text} | owner: {owner_name}")
+    return True
 
 
 # ─────────────────────────────────────────
@@ -558,7 +640,7 @@ def build_email(shift_info: Dict, tickets: List[Dict]) -> Tuple[str, str]:
                         <th style="padding:12px; border-bottom:1px solid #0f2f46; text-align:center; width:18%;">Assigned L1</th>
                         <th style="padding:12px; border-bottom:1px solid #0f2f46; text-align:center; width:12%;">Severity</th>
                         <th style="padding:12px; border-bottom:1px solid #0f2f46; text-align:center; width:13%;">Status</th>
-                        <th style="padding:12px; border-bottom:1px solid #0f2f46; text-align:center; width:14%;">Last Updated</th>
+                        <th style="padding:12px; border-bottom:1px solid #0f2f46; text-align:center; width:14%;">Last Worklog</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -851,9 +933,14 @@ def main():
                         help="Build output without sending email/Teams")
     parser.add_argument("--sandbox", action="store_true",
                         help="Isolated mode: skip API and sending, use local sample tickets")
+    parser.add_argument("--debug-ticket", type=int,
+                        help="Fetch and print latest worklog timestamps for one ticket, then exit")
     parser.add_argument("--preview-file", default="preview_worklog_email.html",
                         help="Path to save generated HTML preview (default: preview_worklog_email.html)")
     args = parser.parse_args()
+
+    if args.debug_ticket:
+        sys.exit(0 if debug_worklog_ticket(args.debug_ticket) else 1)
 
     # Guard: preview-file must stay within the project directory
     _base_dir = os.path.abspath(os.path.dirname(__file__))
