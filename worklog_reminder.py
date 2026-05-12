@@ -28,7 +28,7 @@ from html import escape
 try:
     import schedule
 except ImportError as e:
-    print("❌ 'schedule' library not found. Install with: pip install schedule")
+    print("[ERROR] 'schedule' library not found. Install with: pip install schedule")
     print(f"   Error: {e}")
     sys.exit(1)
 from email.mime.multipart import MIMEMultipart
@@ -67,7 +67,7 @@ def validate_config() -> bool:
     required = {"mesdp": ["base_url", "auth_token"], "email": ["sender", "password", "recipients", "smtp_server", "smtp_port"]}
     for section, keys in required.items():
         if section not in CONFIG:
-            print(f"❌ Missing config section: {section}")
+            print(f"[ERROR] Missing config section: {section}")
             return False
         for key in keys:
             if key not in CONFIG[section]:
@@ -324,55 +324,68 @@ def get_inprogress_summary() -> Optional[Dict]:
     auth_token = CONFIG["mesdp"]["auth_token"]
 
     url = f"{base_url}/api/v3/requests"
-
-    input_data = {
-        "list_info": {
-            "row_count": API_ROW_LIMIT,
-            "start_index": 1,
-            "sort_field": "id",
-            "sort_order": "asc",
-            "search_criteria": [
-                {
-                    "field": "status.name",
-                    "condition": "is",
-                    "value": "In Progress"
-                }
-            ]
-        }
-    }
-
     headers = {
         "authtoken": auth_token,
         "Content-Type": "application/x-www-form-urlencoded"
     }
 
-    try:
-        response = requests.get(
-            url,
-            headers=headers,
-            params={"input_data": json.dumps(input_data)},
-            verify=False,
-            timeout=REQUEST_TIMEOUT
-        )
+    all_requests = []
+    start_index = 1
+    while True:
+        input_data = {
+            "list_info": {
+                "row_count": API_ROW_LIMIT,
+                "start_index": start_index,
+                "sort_field": "id",
+                "sort_order": "asc",
+                "search_criteria": [
+                    {
+                        "field": "status.name",
+                        "condition": "is",
+                        "value": "In Progress"
+                    }
+                ]
+            }
+        }
 
-        if response.status_code != 200:
-            print(f"❌ API Error {response.status_code}: {response.text}")
+        try:
+            response = requests.get(
+                url,
+                headers=headers,
+                params={"input_data": json.dumps(input_data)},
+                verify=False,
+                timeout=REQUEST_TIMEOUT
+            )
+
+            if response.status_code != 200:
+                print(f"[ERROR] API Error {response.status_code}: {response.text}")
+                return []
+        except requests.exceptions.Timeout:
+            print("[ERROR] API Timeout: MESDP service took too long to respond")
             return []
-    except requests.exceptions.Timeout:
-        print("❌ API Timeout: MESDP service took too long to respond")
-        return []
-    except requests.exceptions.RequestException as e:
-        print(f"❌ API Connection Error: {e}")
-        return []
+        except requests.exceptions.RequestException as e:
+            print(f"[ERROR] API Connection Error: {e}")
+            return []
 
-    data               = response.json()
-    requests_list      = data.get("requests", [])
-    today              = date.today()
-    pending_tickets    = []
+        data = response.json()
+        requests_list = data.get("requests", [])
+        list_info = data.get("list_info", {})
+
+        if not requests_list:
+            break
+
+        all_requests.extend(requests_list)
+        if not list_info.get("has_more_rows", False):
+            break
+
+        start_index += API_ROW_LIMIT
+
+    today = date.today()
+    pending_tickets = []
     updated_today_count = 0
-    total_considered   = 0
+    total_considered = 0
 
-    for req in requests_list:
+    for req in all_requests:
         req_id = req.get("id")
 
         # Prefer severity from the Priority section, with fallback to Level.
@@ -450,13 +463,20 @@ def get_last_worklog_date(request_id: int, auth_token: str, base_url: str) -> Op
         if not worklogs:
             return None
 
-        # Ambil worklog paling recent dengan safe type conversion
-        def get_timestamp(w):
+        def get_timestamp_value(w, field):
             try:
-                val = w.get("start_time", {}).get("value", 0)
+                val = w.get(field, {}).get("value", 0)
                 return int(val) if val else 0
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, AttributeError):
                 return 0
+
+        def get_timestamp(w):
+            return max(
+                get_timestamp_value(w, "updated_time"),
+                get_timestamp_value(w, "created_time"),
+                get_timestamp_value(w, "start_time"),
+                get_timestamp_value(w, "end_time"),
+            )
 
         latest = max(worklogs, key=get_timestamp)
         timestamp_ms = get_timestamp(latest)
