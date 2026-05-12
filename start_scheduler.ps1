@@ -39,7 +39,7 @@ if ($existing) {
 }
 
 if ((Test-Path $pythonExe) -and (Test-Path $scriptFile)) {
-    $argList = @("-X", "utf8", $scriptFile, "--schedule")
+    $argList = "-X utf8 `"$scriptFile`" --schedule"
     $proc = Start-Process -FilePath $pythonExe `
         -ArgumentList $argList `
         -WorkingDirectory $projectRoot `
