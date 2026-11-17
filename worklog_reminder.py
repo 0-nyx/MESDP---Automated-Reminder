@@ -1,13 +1,13 @@
 """
 MESDP Worklog Reminder — API Based
 ====================================
-Send reminder 30 minutes before each shift ends.
+Send reminder 1 hour before each shift ends.
 Data fetched from ManageEngine SDP MSP via REST API.
+Who is on shift comes from the CST-NOC roster Excel file (see roster.py).
 
-Shift Schedule:
-  Morning  → 7:00 AM  - 3:00 PM  → Reminder: 2:30 PM
-  Evening  → 3:00 PM  - 11:00 PM → Reminder: 10:30 PM
-  Night    → 11:00 PM - 7:00 AM  → Reminder: 6:30 AM
+Shift Schedule (defaults, editable in the GUI; matches the 12-hour roster):
+  Morning  → 8:00 AM - 8:00 PM → Reminder: 7:00 PM
+  Night    → 8:00 PM - 8:00 AM → Reminder: 7:00 AM
 
 Usage:
   python worklog_reminder.py --shift morning          # Run once for morning shift
@@ -19,7 +19,6 @@ import requests
 import json
 import smtplib
 import ssl
-import urllib3
 import sys
 import time
 import os
@@ -33,33 +32,44 @@ except ImportError as e:
     sys.exit(1)
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from datetime import datetime, date
+import re
+from datetime import datetime, date, timedelta
 from typing import List, Dict, Tuple, Optional
 from config import CONFIG
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         try:
-            _stream.reconfigure(encoding="utf-8", errors="replace")
+            _stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
         except (OSError, ValueError):
             pass
 
 # Disable SSL warning because SDP uses a self-signed cert on port 8443
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ─────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────
-SHIFT_SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "shift_settings.json")
+def _resolve_shift_settings_file() -> str:
+    """The GUI saves shift hours per user under %APPDATA%; prefer that copy and
+    fall back to the file shipped next to this script."""
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        user_file = os.path.join(appdata, "CLL MESDP", "shift_settings.json")
+        if os.path.exists(user_file):
+            return user_file
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "shift_settings.json")
+
+
+SHIFT_SETTINGS_FILE = _resolve_shift_settings_file()
+SHIFT_ORDER = ("morning", "night")   # same two shifts as the CST-NOC roster
 DEFAULT_SHIFT_HOURS = {
-    "morning": (7, 15),    # 7:00 AM - 3:00 PM
-    "evening": (15, 23),   # 3:00 PM - 11:00 PM
-    "night": (23, 7),      # 11:00 PM - 7:00 AM (crosses midnight)
+    "morning": (8, 20),    # 8:00 AM - 8:00 PM
+    "night": (20, 8),      # 8:00 PM - 8:00 AM (crosses midnight)
 }
+# Minutes before shift end: a first reminder at 1 hour, a final one at 30 min.
 DEFAULT_REMINDER_OFFSETS = {
-    "morning": 30,
-    "evening": 30,
-    "night": 30,
+    "morning": [60, 30],
+    "night": [60, 30],
 }
 REQUEST_TIMEOUT = 10
 API_ROW_LIMIT = 100
@@ -87,23 +97,25 @@ def validate_config() -> bool:
     return True
 
 
-def execute_reminder(shift_name: str) -> None:
-    """Execute reminder for specific shift."""
+def execute_reminder(shift_name: str, final: bool = False) -> None:
+    """Execute reminder for specific shift. `final` marks the last reminder of the shift."""
     if shift_name not in SHIFTS:
         print(f"❌ Invalid shift: {shift_name}")
         return
 
     shift_info = SHIFTS[shift_name]
-    print(f"\n⏰ [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Running {shift_name} shift reminder...")
+    kind = "final" if final else "first"
+    print(f"\n⏰ [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Running {shift_name} shift reminder ({kind})...")
 
-    # Pull tickets
-    tickets = get_inprogress_tickets()
+    # Pull tickets with no worklog since this shift's cutoff
+    tickets = get_inprogress_tickets(worklog_cutoff(shift_name))
     if tickets is None:  # API error
         print(f"⚠️  Skipping email send due to API error")
         return
 
     # Build & send
-    subject, html = build_email(shift_info, tickets)
+    subject, html = build_email(shift_info, tickets, get_shift_roster(shift_name),
+                                get_shift_activity(shift_name), shift_name, final=final)
     email_result = send_email(subject, html)
 
     if email_result:
@@ -117,9 +129,11 @@ def schedule_reminders() -> None:
     print(f"\n🕐 Scheduler started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("   Scheduled reminders:")
 
-    for shift, time_str in SHIFT_REMINDER_TIMES.items():
-        schedule.every().day.at(time_str).do(execute_reminder, shift_name=shift)
-        print(f"   • {shift.capitalize()}: {time_str}")
+    for shift, times in SHIFT_REMINDER_TIMES.items():
+        for i, time_str in enumerate(times):
+            final = len(times) > 1 and i == len(times) - 1
+            schedule.every().day.at(time_str).do(execute_reminder, shift_name=shift, final=final)
+            print(f"   • {shift.capitalize()}: {time_str}{' (final)' if final else ''}")
 
     print("\n   Press Ctrl+C to stop scheduler\n")
 
@@ -229,39 +243,59 @@ def _to_minutes(hhmm: str) -> Optional[int]:
     return hh * 60 + mm
 
 
+def parse_reminder_offsets(raw) -> Optional[List[int]]:
+    """Minutes-before-shift-end for each reminder, largest first.
+
+    Accepts an int (old format), a list of ints, or text such as "60, 30".
+    Returns None if nothing valid is found."""
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        items = [raw]
+    elif isinstance(raw, str):
+        items = [p for p in re.split(r"[,\s;]+", raw.strip()) if p]
+    elif isinstance(raw, (list, tuple)):
+        items = list(raw)
+    else:
+        return None
+    offsets = set()
+    for item in items:
+        try:
+            value = int(item)
+        except (TypeError, ValueError):
+            return None
+        if not 0 <= value <= 720:
+            return None
+        offsets.add(value)
+    return sorted(offsets, reverse=True) or None
+
+
 def _build_shift_metadata(
     shift_hours: Dict[str, Tuple[int, int]],
     shift_times: Dict[str, Tuple[str, str]],
-    reminder_offsets: Dict[str, int],
-) -> Tuple[Dict[str, str], Dict[str, Dict[str, str]]]:
-    reminder_times: Dict[str, str] = {}
+    reminder_offsets: Dict[str, List[int]],
+) -> Tuple[Dict[str, List[str]], Dict[str, Dict[str, str]]]:
+    """Reminder clock times per shift (one per offset, earliest first) and labels."""
+    reminder_times: Dict[str, List[str]] = {}
     shift_defs: Dict[str, Dict[str, str]] = {}
 
-    for shift_name in ("morning", "evening", "night"):
+    for shift_name in SHIFT_ORDER:
         start_hour, end_hour = shift_hours[shift_name]
         start_hhmm, end_hhmm = shift_times[shift_name]
-
         end_minutes = _to_minutes(end_hhmm)
-        offset_minutes = int(reminder_offsets.get(shift_name, 30))
-        if offset_minutes < 0:
-            offset_minutes = 0
-        if offset_minutes > 720:
-            offset_minutes = 720
-
         if end_minutes is None:
-            reminder_24h = _compute_reminder_time(end_hour)
-        else:
-            reminder_minutes = (end_minutes - offset_minutes) % (24 * 60)
-            reminder_24h = f"{reminder_minutes // 60:02d}:{reminder_minutes % 60:02d}"
+            end_minutes = end_hour * 60
 
-        reminder_dt = datetime.strptime(reminder_24h, "%H:%M")
-        reminder_12h = reminder_dt.strftime("%I:%M %p").lstrip("0")
+        times_24h = []
+        for offset in reminder_offsets.get(shift_name) or DEFAULT_REMINDER_OFFSETS[shift_name]:
+            minutes = (end_minutes - offset) % (24 * 60)
+            times_24h.append(f"{minutes // 60:02d}:{minutes % 60:02d}")
+
         label = f"{shift_name.capitalize()} Shift ({_format_hhmm_label(start_hhmm)} – {_format_hhmm_label(end_hhmm)})"
-
-        reminder_times[shift_name] = reminder_24h
+        reminder_times[shift_name] = times_24h
         shift_defs[shift_name] = {
             "label": label,
-            "reminder": reminder_12h,
+            "reminder": ", ".join(datetime.strptime(t, "%H:%M").strftime("%I:%M %p").lstrip("0") for t in times_24h),
         }
 
     return reminder_times, shift_defs
@@ -286,7 +320,14 @@ def load_shift_hours() -> Tuple[Dict[str, Tuple[int, int]], Dict[str, Tuple[str,
         return shift_hours, shift_times, reminder_offsets
 
     raw_hours = payload.get("shift_hours", {}) if isinstance(payload, dict) else {}
-    for shift_name in ("morning", "evening", "night"):
+    if isinstance(raw_hours, dict) and "evening" in raw_hours:
+        # Old 3-shift (8-hour) settings: those hours no longer match the
+        # 12-hour roster, so fall back to the defaults until the GUI saves anew.
+        print("⚠️ Shift settings are in the old 3-shift format; using default 2-shift hours "
+              "(08:00-20:00 / 20:00-08:00). Re-save shift settings in the GUI to customise.")
+        return shift_hours, shift_times, reminder_offsets
+
+    for shift_name in SHIFT_ORDER:
         raw_shift = raw_hours.get(shift_name, {}) if isinstance(raw_hours, dict) else {}
         if not isinstance(raw_shift, dict):
             continue
@@ -299,18 +340,17 @@ def load_shift_hours() -> Tuple[Dict[str, Tuple[int, int]], Dict[str, Tuple[str,
         if parsed_start and parsed_end:
             shift_hours[shift_name] = (parsed_start[0], parsed_end[0])
             shift_times[shift_name] = (f"{parsed_start[0]:02d}:{parsed_start[1]:02d}", f"{parsed_end[0]:02d}:{parsed_end[1]:02d}")
-            continue
+        else:
+            # Backward-compatible format: start/end integers
+            start = raw_shift.get("start")
+            end = raw_shift.get("end")
+            if isinstance(start, int) and isinstance(end, int) and 0 <= start <= 23 and 0 <= end <= 23:
+                shift_hours[shift_name] = (start, end)
+                shift_times[shift_name] = (f"{start:02d}:00", f"{end:02d}:00")
 
-        # Backward-compatible format: start/end integers
-        start = raw_shift.get("start")
-        end = raw_shift.get("end")
-        if isinstance(start, int) and isinstance(end, int) and 0 <= start <= 23 and 0 <= end <= 23:
-            shift_hours[shift_name] = (start, end)
-            shift_times[shift_name] = (f"{start:02d}:00", f"{end:02d}:00")
-
-        raw_offset = raw_shift.get("reminder_minutes")
-        if isinstance(raw_offset, int) and 0 <= raw_offset <= 720:
-            reminder_offsets[shift_name] = raw_offset
+        offsets = parse_reminder_offsets(raw_shift.get("reminder_minutes"))
+        if offsets:
+            reminder_offsets[shift_name] = offsets
 
     return shift_hours, shift_times, reminder_offsets
 
@@ -326,8 +366,35 @@ SHIFT_REMINDER_TIMES, SHIFTS = _build_shift_metadata(SHIFT_HOURS, SHIFT_TIMES, S
 # PULL DATA FROM MESDP API
 # ─────────────────────────────────────────
 
-def get_inprogress_summary() -> Optional[Dict]:
-    """Fetch in-progress ticket summary including pending and updated-today counts."""
+def ticket_severity(req: Dict) -> str:
+    """Severity from the Priority field, falling back to Level."""
+    priority_data = req.get("priority") or {}
+    if isinstance(priority_data, dict):
+        severity = priority_data.get("name") or priority_data.get("value") or priority_data.get("display_value") or "N/A"
+    elif isinstance(priority_data, str):
+        severity = priority_data
+    else:
+        severity = "N/A"
+
+    if severity == "N/A":
+        level_data = req.get("level") or {}
+        if isinstance(level_data, dict):
+            severity = level_data.get("name") or level_data.get("value") or "N/A"
+        elif isinstance(level_data, str):
+            severity = level_data
+    return severity
+
+
+def is_pm_ticket(req: Dict) -> bool:
+    """Preventive-maintenance tickets are left out of every reminder count."""
+    return str(ticket_severity(req)).strip().upper() == "PM"
+
+
+def get_inprogress_summary(cutoff: Optional[datetime] = None) -> Optional[Dict]:
+    """Fetch in-progress ticket summary.
+
+    A ticket counts as updated when its latest worklog is at or after `cutoff`
+    (see worklog_cutoff(); defaults to midnight today)."""
     base_url   = CONFIG["mesdp"]["base_url"]
     auth_token = CONFIG["mesdp"]["auth_token"]
 
@@ -361,7 +428,6 @@ def get_inprogress_summary() -> Optional[Dict]:
                 url,
                 headers=headers,
                 params={"input_data": json.dumps(input_data)},
-                verify=False,
                 timeout=REQUEST_TIMEOUT
             )
 
@@ -392,7 +458,9 @@ def get_inprogress_summary() -> Optional[Dict]:
 
         start_index += API_ROW_LIMIT
 
-    today = date.today()
+    if cutoff is None:   # no shift given: "updated" means updated since midnight
+        cutoff = datetime.combine(date.today(), datetime.min.time())
+    cutoff_ms = int(cutoff.timestamp() * 1000)
     pending_tickets = []
     updated_today_count = 0
     total_considered = 0
@@ -400,28 +468,15 @@ def get_inprogress_summary() -> Optional[Dict]:
     for req in all_requests:
         req_id = req.get("id")
 
-        # Prefer severity from the Priority section, with fallback to Level.
-        priority_data = req.get("priority") or {}
-        if isinstance(priority_data, dict):
-            severity = priority_data.get("name") or priority_data.get("value") or priority_data.get("display_value") or "N/A"
-        elif isinstance(priority_data, str):
-            severity = priority_data
-        else:
-            severity = "N/A"
-
-        if severity == "N/A":
-            level_data = req.get("level") or {}
-            if isinstance(level_data, dict):
-                severity = level_data.get("name") or level_data.get("value") or "N/A"
-            elif isinstance(level_data, str):
-                severity = level_data
+        severity = ticket_severity(req)
 
         # Exclude tickets with severity PM from counts and table.
-        if str(severity).strip().upper() == "PM":
+        if is_pm_ticket(req):
             continue
 
         total_considered += 1
-        last_worklog = get_last_worklog_date(req_id, auth_token, base_url)
+        last_ms = get_last_worklog_timestamp_ms(req_id, auth_token, base_url)
+        last_dt = datetime.fromtimestamp(last_ms / 1000) if last_ms else None
         technician = req.get("technician") or {}
 
         status_data = req.get("status") or {}
@@ -432,7 +487,7 @@ def get_inprogress_summary() -> Optional[Dict]:
         else:
             ticket_status = "In Progress"
 
-        if last_worklog is not None and last_worklog >= today:
+        if last_ms and last_ms >= cutoff_ms:
             updated_today_count += 1
             continue
 
@@ -442,20 +497,22 @@ def get_inprogress_summary() -> Optional[Dict]:
             "assigned_l1": technician.get("name", "Unassigned"),
             "severity": severity if severity else "N/A",
             "status": ticket_status,
-            "last_worklog": str(last_worklog) if last_worklog else "No record",
+            "last_worklog": str(last_dt.date()) if last_dt else "No record",
+            "last_worklog_time": last_dt.strftime("%H:%M") if last_dt else "",
         })
 
     return {
         "tickets": pending_tickets,
         "pending_count": len(pending_tickets),
-        "updated_today_count": updated_today_count,
+        "updated_today_count": updated_today_count,   # updated since `cutoff`
         "total_in_progress": total_considered,
+        "cutoff": cutoff,
     }
 
 
-def get_inprogress_tickets() -> Optional[List[Dict]]:
-    """Fetch pending 'In Progress' tickets (worklog not updated today)."""
-    summary = get_inprogress_summary()
+def get_inprogress_tickets(cutoff: Optional[datetime] = None) -> Optional[List[Dict]]:
+    """Fetch pending 'In Progress' tickets (no worklog since `cutoff`)."""
+    summary = get_inprogress_summary(cutoff)
     if summary is None:
         return None
     return summary.get("tickets", [])
@@ -489,7 +546,6 @@ def get_request_worklogs(request_id: int, auth_token: str, base_url: str) -> Opt
                 url,
                 headers=headers,
                 params={"input_data": json.dumps(input_data)},
-                verify=False,
                 timeout=REQUEST_TIMEOUT,
             )
             if response.status_code != 200:
@@ -580,129 +636,461 @@ def debug_worklog_ticket(request_id: int) -> bool:
 # BUILD MESSAGES
 # ─────────────────────────────────────────
 
-def build_email(shift_info: Dict, tickets: List[Dict]) -> Tuple[str, str]:
-    """Build HTML email body with modern design."""
-    today_str   = datetime.now().strftime("%d %B %Y")
-    shift_label = shift_info["label"]
+# ── Email design ──────────────────────────────────────────────────────────────
+# Corporate report style: white page, navy as the single brand colour, red and
+# amber only for items that need attention. Table layout + inline styles +
+# solid colours so it renders the same in Outlook desktop, Outlook web and Gmail.
+_C = {
+    "page": "#f2f4f7", "card": "#ffffff", "ink": "#1d2939", "body": "#344054", "muted": "#667085",
+    "line": "#d0d5dd", "hair": "#eaecf0", "zebra": "#f9fafb", "head": "#f2f4f7",
+    "navy": "#0b2a4a", "navy_soft": "#e9eef5",
+    "red": "#b42318", "amber": "#b54708", "green": "#027a48",
+}
+_STALE_DAYS = 3
+_FONT = "'Segoe UI', Arial, Helvetica, sans-serif"
+_COMPANY = "CLL Systems"
 
-    if not tickets:
-        status_block = """
-        <div style="background:#eefbf4; border:1px solid #b9e7cb; border-left:5px solid #2f9e63; padding:16px; margin:22px 0; border-radius:10px; text-align:center;">
-            <p style="color:#1f6e44; font-size:16px; margin:0; line-height:1.5;"><strong>✅ All assigned tickets have up-to-date worklogs for today.</strong> Thank you for maintaining excellent handover quality.</p>
-        </div>
-        """
-    else:
-        rows = ""
-        for idx, t in enumerate(tickets):
-            row_bg = "#f8fafc" if idx % 2 == 0 else "#ffffff"
-            severity = escape(str(t.get("severity", "N/A")))
-            ticket_status = escape(str(t.get("status", "In Progress")))
-            severity_level = severity.upper()
-            severity_style = "background:#eaf7ee; color:#1d6f42;"
-            if severity_level in {"CRITICAL", "HIGH", "P1", "P2"}:
-                severity_style = "background:#fdecec; color:#a12622;"
-            elif severity_level in {"MEDIUM", "MODERATE", "P3"}:
-                severity_style = "background:#fff4e5; color:#8a6100;"
 
-            status_level = ticket_status.upper()
-            status_style = "background:#eaf3fb; color:#123f63;"
-            if status_level in {"ON HOLD", "PENDING", "WAITING FOR USER"}:
-                status_style = "background:#fff4e5; color:#8a6100;"
-            elif status_level in {"RESOLVED", "CLOSED"}:
-                status_style = "background:#eaf7ee; color:#1d6f42;"
+def _worklog_age(last_worklog: str, today: date) -> Optional[int]:
+    """Days since the last worklog, or None when there is no record."""
+    try:
+        return (today - datetime.strptime(str(last_worklog), "%Y-%m-%d").date()).days
+    except ValueError:
+        return None
 
-            rows += f"""
-            <tr style="background:{row_bg};">
-                <td style="padding:12px; border-bottom:1px solid #dde5ee; font-weight:700; color:#123955; white-space:nowrap; text-align:center;">{escape(str(t['ticket_id']))}</td>
-                <td style="padding:12px; border-bottom:1px solid #dde5ee; text-align:center; line-height:1.45; color:#23374d;">{escape(str(t['title']))}</td>
-                <td style="padding:12px; border-bottom:1px solid #dde5ee; text-align:center; color:#2f3e4f;">{escape(str(t['assigned_l1']))}</td>
-                <td style="padding:12px; border-bottom:1px solid #dde5ee; text-align:center; font-weight:700;">
-                    <span class="pill" style="display:inline-block; padding:3px 7px; border-radius:999px; font-size:11px; white-space:nowrap; {severity_style}">{severity}</span>
-                </td>
-                <td style="padding:12px; border-bottom:1px solid #dde5ee; text-align:center; font-weight:700;">
-                    <span class="pill" style="display:inline-block; padding:3px 7px; border-radius:999px; font-size:11px; white-space:nowrap; {status_style}">{ticket_status}</span>
-                </td>
-                <td style="padding:12px; border-bottom:1px solid #dde5ee; color:#8c2f2b; font-weight:700; text-align:center; white-space:nowrap;">{escape(str(t['last_worklog']))}</td>
-            </tr>"""
 
-        status_block = f"""
-        <div style="margin:22px 0 10px; text-align:left;">
-            <p style="font-size:18px; color:#a04617; margin:0 0 12px; font-weight:700;">⚠️ {len(tickets)} Ticket(s) Pending Worklog Update</p>
-            <div style="background:#fff5e9; border:1px solid #ffd9ad; border-left:5px solid #f28f3b; padding:12px; margin-bottom:18px; border-radius:10px;">
-                <p style="margin:0; color:#8a3b0f; font-size:14px; line-height:1.45;">The tickets below are missing today\'s worklog update. Please update them before shift end to ensure a complete and accurate handover.</p>
-            </div>
-            <div class="ticket-table-wrap" style="overflow-x:auto; -webkit-overflow-scrolling:touch; border-radius:12px;">
-            <table class="ticket-table" role="presentation" style="border-collapse:separate; border-spacing:0; width:100%; font-size:13px; background:#ffffff; border:1px solid #cfd8e3; border-radius:12px; overflow:hidden; table-layout:fixed; min-width:520px;">
-                <thead>
-                    <tr style="background:#123955; color:#ffffff; font-weight:700;">
-                        <th style="padding:12px; border-bottom:1px solid #0f2f46; text-align:center; width:12%;">Ticket ID</th>
-                        <th style="padding:12px; border-bottom:1px solid #0f2f46; text-align:center; width:31%;">Title</th>
-                        <th style="padding:12px; border-bottom:1px solid #0f2f46; text-align:center; width:18%;">Assigned L1</th>
-                        <th style="padding:12px; border-bottom:1px solid #0f2f46; text-align:center; width:12%;">Severity</th>
-                        <th style="padding:12px; border-bottom:1px solid #0f2f46; text-align:center; width:13%;">Status</th>
-                        <th style="padding:12px; border-bottom:1px solid #0f2f46; text-align:center; width:14%;">Last Worklog</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {rows}
-                </tbody>
-            </table>
-            </div>
-        </div>
-        """
+def _age_text(age: Optional[int], last_worklog: str, last_time: str = "") -> Tuple[str, str, str]:
+    """(colour, main label, sub label) for the Last worklog column."""
+    if age is None:
+        return _C["red"], "No worklog", "Never updated"
+    if age <= 0:   # updated today, but before this shift's cutoff
+        return _C["body"], "Before shift", escape(f"Today {last_time}".strip())
+    label = "Yesterday" if age == 1 else f"{age} days ago"
+    colour = _C["amber"] if age >= _STALE_DAYS else _C["body"]
+    return colour, label, escape(str(last_worklog))
 
-    html = f"""
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <style>
-            @media only screen and (max-width: 600px) {{
-                .email-wrapper {{ padding: 0 4px !important; }}
-                .email-header h1 {{ font-size: 20px !important; }}
-                .email-content {{ padding: 16px !important; }}
-                .ticket-table-wrap {{ overflow-x: auto !important; -webkit-overflow-scrolling: touch; }}
-                .ticket-table {{ font-size: 11px !important; min-width: 520px; }}
-                .ticket-table th,
-                .ticket-table td {{ padding: 8px 6px !important; }}
-                .pill {{ padding: 2px 6px !important; font-size: 10px !important; }}
-            }}
-        </style>
-    </head>
-    <body style="font-family:'Trebuchet MS', 'Segoe UI', Tahoma, sans-serif; color:#132236; margin:0; padding:0; background:#f3f6f9; background-image:radial-gradient(circle at 20% -20%, #dce9f7 0, rgba(220,233,247,0) 45%), radial-gradient(circle at 105% 0, #dff2ec 0, rgba(223,242,236,0) 40%);">
-        <div class="email-wrapper" style="max-width:790px; margin:28px auto; padding:0 12px;">
-            <!-- Header -->
-            <div class="email-header" style="background:linear-gradient(145deg, #0b2f4a 0%, #10507a 58%, #1f7a8c 100%); padding:30px 22px 26px; text-align:center; border-radius:14px 14px 0 0; border-bottom:4px solid #f28f3b; box-shadow:0 10px 24px rgba(11, 47, 74, 0.18);">
-                <p style="color:#f8d9b6; margin:0 0 10px; font-size:11px; letter-spacing:1.4px; font-weight:700; text-transform:uppercase;">Operations Notice</p>
-                <h1 style="color:white; margin:0 0 8px; font-size:30px; font-weight:700; letter-spacing:0.2px;">🔔 CLL MESDP Worklog Update Reminder</h1>
-                <p style="color:#e8f4ff; margin:0; font-size:14px;">{shift_label}</p>
-                <p style="color:rgba(255,255,255,0.9); margin:8px 0 0; font-size:12px;">📅 {today_str}</p>
-            </div>
 
-            <!-- Content -->
-            <div class="email-content" style="background:#ffffff; padding:28px; border-radius:0 0 14px 14px; border:1px solid #d5e0ea; border-top:none; box-shadow:0 12px 28px rgba(18, 57, 85, 0.12);">
-                <p style="margin:0 0 16px; font-size:16px; color:#213547; text-align:left;">Dear L1 Team,</p>
-                
-                <div style="background:#eef7ff; border:1px solid #c8def3; border-left:5px solid #1f7a8c; padding:13px; margin-bottom:22px; border-radius:10px; text-align:left;">
-                    <p style="margin:0; color:#174f69; font-size:14px; line-height:1.5;"><strong>⏰ Action required:</strong> Update all assigned tickets with the latest worklog details, current status, and next action before the shift ends.</p>
-                </div>
+def _ticket_url(ticket_id: str) -> Optional[str]:
+    rid = str(ticket_id).lstrip("#")
+    base = str(CONFIG.get("mesdp", {}).get("base_url", "")).rstrip("/")
+    if rid.isdigit() and base.startswith("https://"):
+        return f"{base}/WorkOrder.do?woMode=viewWO&woID={rid}"
+    return None
 
-                {status_block}
 
-                <!-- Footer -->
-                <div style="background:#f2f7fb; border:1px solid #d9e5f0; margin-top:24px; padding:16px; border-radius:10px; text-align:center;">
-                    <p style="margin:0; font-size:12px; color:#4b6075; line-height:1.5;">
-                        ⚙️ This is an automated notification from the CLL MESDP Worklog Update Reminder.<br>
-                        Please do not reply to this email.
-                    </p>
-                </div>
-            </div>
-        </div>
-    </body>
-    </html>
+def _split_title(title: str) -> Tuple[str, str, str]:
+    """'Genting | Commvault | Media Refresh' -> ('Genting', 'Commvault', 'Media Refresh')."""
+    text = str(title or "")
+    parts = [p.strip() for p in text.split("|") if p.strip()]
+    if len(parts) == 1 and text.count(" I ") >= 2:   # "CLL I Generali I Cohesity"
+        parts = [p.strip() for p in text.split(" I ") if p.strip()]
+    if len(parts) >= 3:
+        return parts[0], parts[1], " | ".join(parts[2:])
+    if len(parts) == 2:
+        return parts[0], "", parts[1]
+    return "", "", text
+
+
+def _section_heading(text: str, note: str = "") -> str:
+    note_html = (f'<td align="right" valign="bottom" style="font-size:12px; color:{_C["muted"]}; white-space:nowrap;">'
+                 f'{note}</td>') if note else ""
+    return (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+            f'style="border-bottom:2px solid {_C["navy"]}; margin-bottom:12px;"><tr>'
+            f'<td valign="bottom" style="padding-bottom:6px; font-size:13px; font-weight:700; color:{_C["navy"]}; '
+            f'text-transform:uppercase; letter-spacing:.8px;">{escape(text)}</td>{note_html}</tr></table>')
+
+
+# ── Shift context (roster + SDP activity) ────────────────────────────────────
+
+_ROSTER_UNAVAILABLE = object()
+
+
+def _shift_window(shift_name: str, now: Optional[datetime] = None) -> Tuple[datetime, datetime]:
+    """Start and end of the current occurrence of `shift_name`."""
+    now = now or datetime.now()
+    start_hhmm, end_hhmm = SHIFT_TIMES[shift_name]
+    sh, sm = _parse_hhmm(start_hhmm) or (SHIFT_HOURS[shift_name][0], 0)
+    eh, em = _parse_hhmm(end_hhmm) or (SHIFT_HOURS[shift_name][1], 0)
+    start = now.replace(hour=sh, minute=sm, second=0, microsecond=0)
+    if (sh, sm) > (eh, em) and (now.hour, now.minute) < (eh, em):
+        start -= timedelta(days=1)          # night shift that started yesterday
+    end = start.replace(hour=eh, minute=em)
+    if end <= start:
+        end += timedelta(days=1)
+    return start, end
+
+
+def _next_shift(shift_name: str, now: Optional[datetime] = None) -> Tuple[str, datetime]:
+    """The shift after the current occurrence of `shift_name`, and its start."""
+    _, end = _shift_window(shift_name, now)
+    order = list(SHIFT_ORDER)
+    return order[(order.index(shift_name) + 1) % len(order)], end
+
+
+def worklog_cutoff(shift_name: str, now: Optional[datetime] = None) -> datetime:
+    """Earliest worklog time that counts for this shift: the previous shift's
+    final reminder (e.g. 07:30 for Morning, 19:30 for Night). Updates made
+    after the previous shift was last reminded belong to this shift."""
+    start, _ = _shift_window(shift_name, now)
+    order = list(SHIFT_ORDER)
+    prev = order[(order.index(shift_name) - 1) % len(order)]
+    offsets = SHIFT_REMINDER_OFFSETS.get(prev) or DEFAULT_REMINDER_OFFSETS[prev]
+    return start - timedelta(minutes=min(offsets))
+
+
+def get_shift_roster(shift_name: str):
+    """Current and next shift from the roster.
+
+    Returns {"current": <roster result or None>, "next": <roster result or None>},
+    None when no roster file is configured, or _ROSTER_UNAVAILABLE when one is
+    configured but could not be read.
     """
+    import roster
+    if not roster.roster_path():
+        return None
+    start, _ = _shift_window(shift_name)
+    next_name, next_start = _next_shift(shift_name)
+    results = roster.get_on_shifts([(shift_name, start.date()), (next_name, next_start.date())])
+    if not results or all(r is None for r in results):
+        return _ROSTER_UNAVAILABLE
+    for label, res in (("On shift", results[0]), ("Next shift", results[1])):
+        if res:
+            names = ", ".join(p["name"] + (" (first contact)" if p["first_contact"] else "") for p in res["people"])
+            print(f"👥 {label} ({res['shift']}, {res['date']:%d %b}): {names or 'nobody rostered'}")
+    return {"current": results[0], "next": results[1]}
 
-    subject = f"[MESDP] CLL Worklog Update Reminder — {shift_label.split('(')[0].strip()} | {today_str}"
+
+STATUS_IN_PROGRESS = "In Progress"
+STATUS_ON_HOLD = "Onhold"       # the status name used in this SDP instance
+
+
+_COUNT_MAX_PAGES = 20   # 2,000 tickets per count is far above any real queue
+
+
+def _count_requests(criteria: List[Dict]) -> Optional[int]:
+    """Number of non-PM requests matching an SDP search_criteria list.
+
+    The tickets are listed and filtered here (rather than using the API's
+    total_count) so PM tickets are excluded with the same rule as the
+    worklog check."""
+    base_url = CONFIG["mesdp"]["base_url"]
+    count, start = 0, 1
+    try:
+        for _ in range(_COUNT_MAX_PAGES):
+            list_info = {"row_count": API_ROW_LIMIT, "start_index": start, "search_criteria": criteria}
+            r = requests.get(f"{base_url}/api/v3/requests",
+                             headers={"authtoken": CONFIG["mesdp"]["auth_token"]},
+                             params={"input_data": json.dumps({"list_info": list_info})},
+                             timeout=REQUEST_TIMEOUT)
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            page = data.get("requests", [])
+            count += sum(1 for req in page if isinstance(req, dict) and not is_pm_ticket(req))
+            if not (data.get("list_info") or {}).get("has_more_rows") or not page:
+                return count
+            start += API_ROW_LIMIT
+        return None   # unexpectedly large result: show "-" rather than a wrong number
+    except (requests.exceptions.RequestException, ValueError, TypeError):
+        return None
+
+
+def get_shift_activity(shift_name: str) -> Optional[Dict]:
+    """Ticket counts for the email (None if every API call fails):
+    opened / closed since the shift started, plus the current In Progress and
+    On Hold queue sizes."""
+    start, _ = _shift_window(shift_name)
+    now = datetime.now()
+    window = [str(int(start.timestamp() * 1000)), str(int(now.timestamp() * 1000))]
+    counts = {
+        "opened": _count_requests([{"field": "created_time", "condition": "between", "values": window}]),
+        "closed": _count_requests([{"field": "completed_time", "condition": "between", "values": window}]),
+        "in_progress": _count_requests([{"field": "status.name", "condition": "is", "value": STATUS_IN_PROGRESS}]),
+        "on_hold": _count_requests([{"field": "status.name", "condition": "is", "value": STATUS_ON_HOLD}]),
+    }
+    if all(v is None for v in counts.values()):
+        return None
+    print(f"📈 Since {start:%H:%M}: {counts['opened']} opened, {counts['closed']} closed | "
+          f"queue: {counts['in_progress']} in progress, {counts['on_hold']} on hold")
+    return {**counts, "since": start, "until": now}
+
+
+# ── Email blocks ─────────────────────────────────────────────────────────────
+
+def _roster_rows(people: List[Dict], muted: bool = False) -> str:
+    tiers: Dict[str, List[Dict]] = {}
+    for p in people:
+        tiers.setdefault(p.get("tier") or "Team", []).append(p)
+    text_colour = _C["body"] if muted else _C["ink"]
+    rows = ""
+    for i, (tier, members) in enumerate(tiers.items()):
+        names = ", ".join(
+            escape(p["name"]) + (f' <span style="color:{_C["amber"]}; font-weight:700;">(First contact)</span>'
+                                 if p.get("first_contact") else "")
+            for p in members)
+        top = f"border-top:1px solid {_C['hair']};" if i else ""
+        rows += (f'<tr><td valign="top" style="padding:7px 12px 7px 0; width:64px; font-size:12px; font-weight:700; '
+                 f'color:{_C["muted"]}; {top}">{escape(tier)}</td>'
+                 f'<td valign="top" style="padding:7px 0; font-size:14px; color:{text_colour}; {top}">{names}</td></tr>')
+    if not rows:
+        rows = (f'<tr><td style="padding:7px 0; font-size:13px; color:{_C["muted"]};">'
+                f'No engineers are rostered for this shift.</td></tr>')
+    return f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0">{rows}</table>'
+
+
+def _roster_subheading(kind: str, res: Optional[Dict], fallback_shift: str) -> str:
+    shift = (res or {}).get("shift") or fallback_shift
+    times = SHIFT_TIMES.get(shift)
+    when = f"{times[0]}&ndash;{times[1]}" if times else ""
+    day = f" &middot; {res['date']:%a %d %b}" if res and res.get("date") else ""
+    return (f'<div style="margin:4px 0 2px; font-size:12px; color:{_C["muted"]};">'
+            f'<strong style="color:{_C["navy"]}; text-transform:uppercase; letter-spacing:.5px;">{kind}</strong>'
+            f' &nbsp;{escape(shift.capitalize())} &middot; {when}{day}</div>')
+
+
+def _on_shift_block(on_shift, shift_name: Optional[str] = None) -> str:
+    if on_shift is None:
+        return ""
+    if on_shift is _ROSTER_UNAVAILABLE or not isinstance(on_shift, dict):
+        return (f'<tr><td class="px" style="padding:24px 32px 0; font-size:12px; color:{_C["muted"]};">'
+                f'Duty roster unavailable (roster file could not be read).</td></tr>')
+
+    current, nxt = on_shift.get("current"), on_shift.get("next")
+    cur_name = (current or {}).get("shift") or shift_name or ""
+    next_name = (nxt or {}).get("shift") or (_next_shift(shift_name)[0] if shift_name in SHIFT_TIMES else "")
+
+    def unavailable() -> str:
+        return (f'<div style="padding:7px 0; font-size:13px; color:{_C["muted"]};">'
+                f'Not found in the roster for this date.</div>')
+
+    # Current shift
+    body = _roster_subheading("Current shift", current, cur_name)
+    body += _roster_rows(current["people"]) if current else unavailable()
+    first = [p for p in (current or {}).get("people", []) if p.get("first_contact")]
+    if first:
+        who = ", ".join(escape(p["name"]) + (f' ({escape(p["tier"])})' if p.get("tier") else "") for p in first)
+        body += (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:8px;">'
+                 f'<tr><td style="border-left:3px solid {_C["navy"]}; background:{_C["navy_soft"]}; padding:9px 12px; '
+                 f'font-size:13px; color:{_C["ink"]};"><strong>First point of contact:</strong> {who}</td></tr></table>')
+
+    # Next shift (handover target)
+    if next_name:
+        body += (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:16px;">'
+                 f'<tr><td style="border-top:1px dashed {_C["line"]}; padding-top:12px;">'
+                 f'{_roster_subheading("Next shift", nxt, next_name)}'
+                 f'{_roster_rows(nxt["people"], muted=True) if nxt else unavailable()}'
+                 f'</td></tr></table>')
+
+    return (f'<tr><td class="px" style="padding:28px 32px 0;">'
+            f'{_section_heading("Duty roster")}{body}</td></tr>')
+
+
+def _kpi(value, label: str, colour: str, first: bool = False) -> str:
+    shown = "&ndash;" if value is None else str(value)
+    border = "" if first else f"border-left:1px solid {_C['hair']};"
+    return (f'<td class="kpi" align="center" valign="top" style="padding:14px 6px; {border}">'
+            f'<div class="kpinum" style="font-size:26px; line-height:30px; font-weight:700; color:{colour};">{shown}</div>'
+            f'<div class="kpilbl" style="font-size:11px; line-height:15px; color:{_C["muted"]}; margin-top:4px;">{label}</div></td>')
+
+
+def _summary_block(pending: int, no_record: int, stale: int, activity: Optional[Dict]) -> str:
+    def group(title: str, cells: str, width: str) -> str:
+        return (f'<td class="stack grp" valign="top" width="{width}" style="padding:0;">'
+                f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid {_C["line"]};">'
+                f'<tr><td style="background:{_C["head"]}; padding:7px 8px; font-size:11px; font-weight:700; color:{_C["muted"]}; '
+                f'text-transform:uppercase; letter-spacing:.3px; white-space:nowrap; border-bottom:1px solid {_C["line"]};">{title}</td></tr>'
+                f'<tr><td><table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>{cells}</tr></table>'
+                f'</td></tr></table></td>')
+
+    gap = '<td class="stack gap" width="10" style="font-size:0; line-height:0;">&nbsp;</td>'
+    worklog = group("Worklog compliance",
+                    _kpi(pending, "Pending", _C["navy"], first=True)
+                    + _kpi(no_record, "No worklog", _C["red"] if no_record else _C["navy"])
+                    + _kpi(stale, f"{_STALE_DAYS}+ days old", _C["amber"] if stale else _C["navy"]),
+                    "40%" if activity else "100%")
+    groups = worklog
+    note = ""
+    if activity:
+        in_progress = group("In progress", _kpi(activity.get("in_progress"), "Tickets", _C["navy"], first=True), "17%")
+        on_hold = group("On hold", _kpi(activity.get("on_hold"), "Tickets", _C["amber"], first=True), "14%")
+        shift = group(f"This shift &middot; {activity['since']:%H:%M}+",
+                      _kpi(activity.get("opened"), "Opened", _C["navy"], first=True)
+                      + _kpi(activity.get("closed"), "Closed", _C["green"]),
+                      "27%")
+        groups = in_progress + gap + on_hold + gap + worklog + gap + shift
+        note = f"As at {activity['until']:%H:%M} &middot; PM tickets excluded"
+    return (f'<tr><td class="px" style="padding:28px 32px 0;">'
+            f'{_section_heading("Summary", note)}'
+            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>{groups}</tr></table></td></tr>')
+
+
+def _ticket_row(t: Dict, zebra: bool) -> str:
+    """One ticket. Wide screens get separate columns (class "dcol"); on phones
+    those columns are hidden and the "mob" lines inside the subject cell show
+    customer / owner instead."""
+    colour, label, sub = _age_text(t["_age"], t.get("last_worklog", ""), t.get("last_worklog_time", ""))
+    customer, product, rest = _split_title(t.get("title", ""))
+    url = _ticket_url(t.get("ticket_id", ""))
+    tid = escape(str(t.get("ticket_id", "")))
+    tid_html = (f'<a href="{escape(url, quote=True)}" style="color:{_C["navy"]}; font-weight:700; text-decoration:underline;">{tid}</a>'
+                if url else f'<strong style="color:{_C["navy"]};">{tid}</strong>')
+
+    owner = escape(str(t.get("assigned_l1") or "Unassigned"))
+    sev = str(t.get("severity", "") or "")
+    sev_txt = escape(sev) if sev and sev.upper() not in {"N/A", "REQUEST"} else ""
+    status = str(t.get("status", "") or "")
+    status_txt = escape(status) if status and status.upper() != "IN PROGRESS" else ""
+    sev_cell = " &middot; ".join(x for x in (sev_txt, status_txt) if x) or f'<span style="color:{_C["muted"]};">&ndash;</span>'
+
+    context = " &middot; ".join(escape(x) for x in (customer, product) if x)
+    mob_owner = owner + "".join(f" &middot; {x}" for x in (sev_txt, status_txt) if x)
+    hidden = "display:none; mso-hide:all; max-height:0; overflow:hidden;"
+
+    bg = _C["zebra"] if zebra else _C["card"]
+    cell = f"border-top:1px solid {_C['hair']}; background:{bg}; font-size:13px; line-height:19px;"
+    return (
+        f'<tr>'
+        f'<td class="idcol" valign="top" style="{cell} padding:10px 10px 10px 12px; white-space:nowrap;">{tid_html}</td>'
+        f'<td class="dcol" valign="top" style="{cell} padding:10px; font-weight:700; color:{_C["ink"]};">{escape(customer) or "&ndash;"}</td>'
+        f'<td class="dcol" valign="top" style="{cell} padding:10px; color:{_C["body"]};">{escape(product) or "&ndash;"}</td>'
+        f'<td valign="top" style="{cell} padding:10px; color:{_C["ink"]};">'
+        + (f'<div class="mob" style="{hidden} font-size:11px; font-weight:700; color:{_C["muted"]}; '
+           f'text-transform:uppercase; letter-spacing:.4px;">{context}</div>' if context else "")
+        + f'{escape(rest)}'
+        f'<div class="mob" style="{hidden} font-size:12px; color:{_C["muted"]}; margin-top:3px;">{mob_owner}</div></td>'
+        f'<td class="dcol" valign="top" style="{cell} padding:10px; color:{_C["body"]}; white-space:nowrap;">{owner}</td>'
+        f'<td class="dcol" valign="top" style="{cell} padding:10px; color:{_C["body"]}; white-space:nowrap;">{sev_cell}</td>'
+        f'<td class="agecol" valign="top" align="right" style="{cell} padding:10px 12px 10px 6px; text-align:right; white-space:nowrap;">'
+        f'<div style="font-weight:700; color:{colour};">{label}</div>'
+        f'<div class="agesub" style="font-size:11px; color:{_C["muted"]}; margin-top:2px;">{sub}</div></td>'
+        f'</tr>'
+    )
+
+
+def build_email(shift_info: Dict, tickets: List[Dict], on_shift=None, activity: Optional[Dict] = None,
+                shift_name: Optional[str] = None, final: bool = False) -> Tuple[str, str]:
+    """Build the reminder email.
+
+    on_shift:  result of get_shift_roster() (None hides the duty roster).
+    activity:  result of get_shift_activity() (None hides opened/closed).
+    """
+    now = datetime.now()
+    today = now.date()
+    shift_label = shift_info["label"]
+    shift_short = shift_label.split("(")[0].strip()
+    hours_txt = shift_label[shift_label.find("(") + 1:shift_label.rfind(")")] if "(" in shift_label else ""
+
+    enriched = [{**t, "_age": _worklog_age(t.get("last_worklog", ""), today)} for t in tickets]
+    no_record = sum(1 for t in enriched if t["_age"] is None)
+    stale = sum(1 for t in enriched if t["_age"] is not None and t["_age"] >= _STALE_DAYS)
+
+    ends_txt = ""
+    if shift_name in SHIFT_TIMES:
+        _, end = _shift_window(shift_name, now)
+        mins = int((end - now).total_seconds() // 60)
+        if 0 < mins <= 12 * 60:
+            ends_txt = (f"Shift ends in {mins} minutes" if mins < 60
+                        else f"Shift ends in {mins // 60} h {mins % 60:02d} min")
+
+    header = (
+        f'<tr><td height="6" bgcolor="{_C["navy"]}" style="background:{_C["navy"]}; font-size:0; line-height:0;">&nbsp;</td></tr>'
+        f'<tr><td class="px" style="padding:22px 32px 20px; border-bottom:1px solid {_C["line"]};">'
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>'
+        f'<td class="stack" valign="top">'
+        f'<div style="font-size:12px; font-weight:700; color:{_C["navy"]}; letter-spacing:1.5px; text-transform:uppercase;">'
+        f'{_COMPANY} &nbsp;|&nbsp; Service Desk Operations</div>'
+        f'<div style="font-size:22px; line-height:28px; font-weight:700; color:{_C["ink"]}; margin-top:8px;">'
+        f'{"Final Worklog Reminder" if final else "Worklog Update Reminder"}</div>'
+        f'<div style="font-size:14px; color:{_C["body"]}; margin-top:2px;">{escape(shift_short)}'
+        f'{f" &nbsp;&middot;&nbsp; {escape(hours_txt)}" if hours_txt else ""}</div></td>'
+        f'<td class="stack metacell" valign="top" align="right" style="font-size:12px; line-height:18px; color:{_C["muted"]}; '
+        f'white-space:nowrap; padding-left:16px;">{now:%d %B %Y}<br>Generated {now:%H:%M}'
+        f'{f"<br><strong style=\"color:{_C["amber"]};\">{ends_txt}</strong>" if ends_txt else ""}</td>'
+        f'</tr></table></td></tr>'
+    )
+
+    since_txt = (f" (since {worklog_cutoff(shift_name, now):%H:%M})"
+                 if shift_name in SHIFT_TIMES else "")
+    intro = (
+        f'<tr><td class="px" style="padding:24px 32px 0; font-size:14px; line-height:22px; color:{_C["body"]};">'
+        + (f"Dear Team,<br>Please ensure every ticket listed below has a worklog for this shift{since_txt} "
+           "(progress, current status and next action) <strong>before the end of the shift</strong>."
+           if enriched else
+           f"Dear Team,<br>All in-progress tickets have a worklog for this shift{since_txt}. "
+           "Thank you for maintaining a complete handover.")
+        + '</td></tr>'
+    )
+
+    if enriched:
+        ordered = sorted(enriched, key=lambda t: (t["_age"] is not None, -(t["_age"] or 0)))
+        rows = "".join(_ticket_row(t, i % 2 == 1) for i, t in enumerate(ordered))
+        th = (f'background:{_C["head"]}; padding:8px 10px; font-size:11px; font-weight:700; color:{_C["muted"]}; '
+              f'text-transform:uppercase; letter-spacing:.5px; border-bottom:1px solid {_C["line"]};')
+        tickets_block = (
+            f'<tr><td class="px" style="padding:28px 32px 0;">'
+            f'{_section_heading("Tickets pending worklog", f"{len(enriched)} ticket{"s" if len(enriched) != 1 else ""} &middot; oldest first")}'
+            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid {_C["line"]};">'
+            f'<tr><td class="idcol" style="{th} padding-left:12px;">Ticket</td>'
+            f'<td class="dcol" style="{th}">Customer</td><td class="dcol" style="{th}">Product</td>'
+            f'<td style="{th}">Subject</td><td class="dcol" style="{th}">Owner</td><td class="dcol" style="{th}">Severity</td>'
+            f'<td class="agecol" style="{th} text-align:right; padding-right:12px;">Last worklog</td></tr>'
+            f'{rows}</table></td></tr>'
+        )
+    else:
+        tickets_block = ""
+
+    footer = (
+        f'<tr><td class="px" style="padding:32px 32px 28px;">'
+        f'<div style="border-top:1px solid {_C["line"]}; padding-top:14px; font-size:11px; line-height:17px; color:{_C["muted"]};">'
+        f'This is an automated notification generated from ManageEngine ServiceDesk Plus. Please do not reply to this email.<br>'
+        f'{_COMPANY} &middot; Internal use only.</div></td></tr>'
+    )
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="x-apple-disable-message-reformatting">
+<title>Worklog Update Reminder</title>
+<style>
+  @media only screen and (max-width: 620px) {{
+    .wrap {{ width: 100% !important; }}
+    .px {{ padding-left: 16px !important; padding-right: 16px !important; }}
+    .stack {{ display: block !important; width: 100% !important; text-align: left !important; padding-left: 0 !important; }}
+    .metacell {{ padding-top: 12px !important; }}
+    .kpi {{ padding: 10px 2px !important; }}
+    .gap {{ height: 10px !important; }}
+    .kpinum {{ font-size: 20px !important; line-height: 24px !important; }}
+    .kpilbl {{ font-size: 10px !important; line-height: 13px !important; }}
+    .idcol {{ width: 52px !important; padding-left: 8px !important; }}
+    .agecol {{ width: 80px !important; }}
+    .agesub {{ display: none !important; }}
+    .dcol {{ display: none !important; }}
+    .mob {{ display: block !important; max-height: none !important; overflow: visible !important; }}
+  }}
+</style>
+</head>
+<body style="margin:0; padding:0; background:{_C['page']}; font-family:{_FONT}; color:{_C['ink']};">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="{_C['page']}" style="background:{_C['page']};">
+<tr><td align="center" style="padding:24px 10px;">
+  <table role="presentation" class="wrap" width="100%" cellpadding="0" cellspacing="0" bgcolor="{_C['card']}"
+         style="width:100%; max-width:1400px; background:{_C['card']}; border:1px solid {_C['line']}; font-family:{_FONT};">
+    {header}
+    {intro}
+    {_on_shift_block(on_shift, shift_name)}
+    {_summary_block(len(enriched), no_record, stale, activity)}
+    {tickets_block}
+    {footer}
+  </table>
+</td></tr>
+</table>
+</body>
+</html>"""
+
+    count_part = f"{len(tickets)} ticket{'s' if len(tickets) != 1 else ''} pending" if tickets else "all updated"
+    title = "FINAL Worklog Reminder" if final else "Worklog Update Reminder"
+    subject = f"[MESDP] {title} — {shift_short} | {count_part} | {now:%d %b %Y}"
     return subject, html
 
 
@@ -925,10 +1313,12 @@ def main():
 
     # Parse arguments
     parser = argparse.ArgumentParser(description="MESDP Worklog Reminder")
-    parser.add_argument("--shift", choices=["morning", "evening", "night"], 
-                        help="Shift to send reminder (morning/evening/night)")
+    parser.add_argument("--shift", choices=list(SHIFT_ORDER),
+                        help="Shift to send reminder (morning/night)")
     parser.add_argument("--schedule", action="store_true", 
                         help="Run scheduler mode (continuous, auto-send at reminder times)")
+    parser.add_argument("--final", action="store_true",
+                        help="Send/preview the final (last) reminder of the shift")
     parser.add_argument("--dry-run", action="store_true",
                         help="Build output without sending email/Teams")
     parser.add_argument("--sandbox", action="store_true",
@@ -970,16 +1360,19 @@ def main():
         tickets = get_sample_tickets()
     else:
         print("📡 Connecting to MESDP API...")
-        tickets = get_inprogress_tickets()
+        cutoff = worklog_cutoff(auto_shift)
+        print(f"   Worklog counted from {cutoff:%d %b %H:%M}")
+        tickets = get_inprogress_tickets(cutoff)
 
     if tickets is None:
         print("❌ Failed to pull tickets. Exiting.")
         sys.exit(1)
 
-    print(f"⚠️  {len(tickets)} ticket(s) have not updated worklog today.")
+    print(f"⚠️  {len(tickets)} ticket(s) have no worklog for this shift yet.")
 
     # Build & send
-    subject, html = build_email(shift_info, tickets)
+    activity = None if args.sandbox else get_shift_activity(auto_shift)
+    subject, html = build_email(shift_info, tickets, get_shift_roster(auto_shift), activity, auto_shift, final=args.final)
     preview_result = save_preview_html(args.preview_file, html)
 
     if args.sandbox:

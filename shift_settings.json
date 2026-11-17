@@ -1,19 +1,20 @@
 {
   "shift_hours": {
     "morning": {
-      "start_time": "07:00",
-      "end_time": "15:00",
-      "reminder_minutes": 30
-    },
-    "evening": {
-      "start_time": "15:00",
-      "end_time": "23:00",
-      "reminder_minutes": 30
+      "start_time": "08:00",
+      "end_time": "20:00",
+      "reminder_minutes": [
+        60,
+        30
+      ]
     },
     "night": {
-      "start_time": "23:00",
-      "end_time": "07:00",
-      "reminder_minutes": 30
+      "start_time": "20:00",
+      "end_time": "08:00",
+      "reminder_minutes": [
+        60,
+        30
+      ]
     }
   }
 }

@@ -1,5 +1,6 @@
 # config.example.py — commit-safe template
-# Copy this file to config.py and fill with real values locally.
+# Reference only. Real values live in %APPDATA%\CLL MESDP\app_config.json
+# (same keys, JSON), written by the Scheduler Control GUI. See config.py.
 
 CONFIG = {
     "mesdp": {

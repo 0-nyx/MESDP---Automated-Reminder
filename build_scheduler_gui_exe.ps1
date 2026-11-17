@@ -6,12 +6,37 @@ $guiScript = Join-Path $projectRoot "scheduler_gui.py"
 $schedulerScript = Join-Path $projectRoot "worklog_reminder.py"
 $iconFile = Join-Path $projectRoot "dist\app_icon.ico"
 $pythonRoot = (& $pythonExe -c "import sys; print(sys.base_prefix)")
-$tclLibrary = Join-Path $pythonRoot "tcl\tcl8.6"
-$tkLibrary = Join-Path $pythonRoot "tcl\tk8.6"
+
+# Python <= 3.12 ships Tcl/Tk 8.6; Python 3.13+ ships Tcl/Tk 9.0.
+$tclCandidates = @(
+    (Join-Path $pythonRoot "tcl\tcl8.6"),
+    (Join-Path $pythonRoot "tcl\tcl9.0"),
+    (Join-Path $pythonRoot "tcl")
+)
+$tkCandidates = @(
+    (Join-Path $pythonRoot "tcl\tk8.6"),
+    (Join-Path $pythonRoot "tcl\tk9.0"),
+    (Join-Path $pythonRoot "tcl")
+)
+
+$tclLibrary = $tclCandidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+$tkLibrary = $tkCandidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
 $tkinterLibrary = Join-Path $pythonRoot "Lib\tkinter"
 $tkinterPyd = Join-Path $pythonRoot "DLLs\_tkinter.pyd"
-$tclDll = Join-Path $pythonRoot "DLLs\tcl86t.dll"
-$tkDll = Join-Path $pythonRoot "DLLs\tk86t.dll"
+
+$tclDllCandidates = @(
+    (Join-Path $pythonRoot "DLLs\tcl86t.dll"),
+    (Join-Path $pythonRoot "DLLs\tcl90.dll"),
+    (Join-Path $pythonRoot "DLLs\tcl9tk90.dll")
+)
+$tkDllCandidates = @(
+    (Join-Path $pythonRoot "DLLs\tk86t.dll"),
+    (Join-Path $pythonRoot "DLLs\tk90.dll"),
+    (Join-Path $pythonRoot "DLLs\tcl9tk90.dll")
+)
+
+$tclDll = $tclDllCandidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+$tkDll = $tkDllCandidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
 
 if (-not (Test-Path $pythonExe)) {
     Write-Error "Python executable not found at $pythonExe"
@@ -62,6 +87,7 @@ try {
         --hidden-import tkinter.filedialog `
         --hidden-import tkinter.font `
         --hidden-import tkinter.constants `
+        --collect-all customtkinter `
         --add-binary "$tkinterPyd;." `
         --add-binary "$tclDll;." `
         --add-binary "$tkDll;." `

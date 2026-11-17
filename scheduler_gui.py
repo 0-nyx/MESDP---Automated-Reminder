@@ -33,6 +33,9 @@ try:
 except Exception:
     _wr_bundle_hint = None
 
+# Same two shifts as the CST-NOC roster (worklog_reminder.SHIFT_ORDER).
+SHIFT_NAMES = ("morning", "night")
+
 
 # ── Design Tokens ─────────────────────────────────────────────────────────────
 BG          = "#071017"
@@ -289,9 +292,8 @@ class SchedulerGui:
     def _get_current_shift(self) -> str:
         # Default shift windows if the settings file is missing/invalid.
         shift_windows = {
-            "morning": ("07:00", "15:00"),
-            "evening": ("15:00", "23:00"),
-            "night": ("23:00", "07:00"),
+            "morning": ("08:00", "20:00"),
+            "night": ("20:00", "08:00"),
         }
         try:
             # Auto-migrate from old location if new location doesn't exist
@@ -305,8 +307,9 @@ class SchedulerGui:
             with open(self.shift_settings_file, encoding="utf-8") as f:
                 data = json.load(f)
             hours = data.get("shift_hours", {}) if isinstance(data, dict) else {}
-            if isinstance(hours, dict):
-                for shift in ("morning", "evening", "night"):
+            # Old 3-shift files ("evening" present) no longer apply: keep defaults.
+            if isinstance(hours, dict) and "evening" not in hours:
+                for shift in SHIFT_NAMES:
                     raw = hours.get(shift, {})
                     if isinstance(raw, dict):
                         start_time = str(raw.get("start_time", "")).strip()
@@ -318,7 +321,7 @@ class SchedulerGui:
 
         now = datetime.now()
         now_min = now.hour * 60 + now.minute
-        for shift in ("morning", "evening", "night"):
+        for shift in SHIFT_NAMES:
             start_raw, end_raw = shift_windows[shift]
             start_min = self._parse_hhmm_minutes(start_raw)
             end_min = self._parse_hhmm_minutes(end_raw)
@@ -360,6 +363,7 @@ class SchedulerGui:
             f"$projectRoot='{project_root_ps}';"
             f"$parentRoot='{parent_root_ps}';"
             "$r=Get-CimInstance Win32_Process|Where-Object{"
+            "$_.ProcessId -ne $PID -and "  # this query's own command line matches the patterns
             "$_.CommandLine -and "
             "("
             "$_.CommandLine -like '*worklog_reminder.py*--schedule*' -or "
@@ -849,7 +853,10 @@ class SchedulerGui:
             if t.is_alive():
                 return 1, f"Inline Python timeout after {timeout_sec}s"
             return int(result.get("rc", 1)), str(result.get("out", ""))
-        cmd = [self.python_exe, "-X", "utf8", "-c", code_text]
+        # Code goes in on stdin, not with -c: inline snippets can contain the
+        # MESDP token / SMTP password, and command lines are readable by other
+        # processes on the machine.
+        cmd = [self.python_exe, "-X", "utf8", "-"]
         kw: dict = {"cwd": self.project_root, "capture_output": True,
                     "text": True, "encoding": "utf-8", "errors": "replace"}
         if os.name == "nt":
@@ -859,7 +866,7 @@ class SchedulerGui:
             kw["startupinfo"] = si
             kw["creationflags"] = subprocess.CREATE_NO_WINDOW
         try:
-            p = subprocess.run(cmd, timeout=max(1, timeout_sec), **kw)
+            p = subprocess.run(cmd, input=code_text, timeout=max(1, timeout_sec), **kw)
             return p.returncode, ((p.stdout or "") + ("\n" + p.stderr if p.stderr else "")).strip()
         except subprocess.TimeoutExpired:
             return 1, f"Python inline timeout after {timeout_sec}s"
@@ -923,7 +930,8 @@ class SchedulerGui:
             if isinstance(val, (list, tuple)) and len(val) == 2:
                 sv.set(str(val[0])); ev.set(str(val[1]))
             if sn in self.shift_reminder_vars:
-                self.shift_reminder_vars[sn].set(str(offsets.get(sn, 30)))
+                val = offsets.get(sn, [60, 30])
+                self.shift_reminder_vars[sn].set(", ".join(map(str, val)) if isinstance(val, (list, tuple)) else str(val))
         self._refresh_shift_preview(parsed.get("reminders", {}))
 
     def _open_runtime_config_window(self, force: bool = False) -> None:
@@ -994,7 +1002,7 @@ class SchedulerGui:
 
         fields = [
             ("MESDP Link", self.cfg_mesdp_url_var, False),
-            ("MESDP Token", self.cfg_mesdp_token_var, False),
+            ("MESDP Token", self.cfg_mesdp_token_var, True),
             ("SMTP Server", self.cfg_smtp_server_var, False),
             ("SMTP Port", self.cfg_smtp_port_var, False),
             ("Email Sender", self.cfg_email_sender_var, False),
@@ -1343,8 +1351,7 @@ class SchedulerGui:
         use_starttls = bool(email.get("use_starttls", True))
 
         code = (
-            "import json, smtplib, requests, urllib3\n"
-            "urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)\n"
+            "import json, smtplib, ssl, requests\n"
             f"base={mesdp['base_url']!r}\n"
             f"token={mesdp['auth_token']!r}\n"
             f"sender={email['sender']!r}\n"
@@ -1356,13 +1363,13 @@ class SchedulerGui:
             "try:\n"
             "  h={'authtoken': token, 'Accept':'application/vnd.manageengine.sdp.v3+json'}\n"
             "  p={'input_data':'{\"list_info\":{\"start_index\":1,\"row_count\":1}}'}\n"
-            "  r=requests.get(base + '/api/v3/requests', headers=h, params=p, verify=False, timeout=12)\n"
+            "  r=requests.get(base + '/api/v3/requests', headers=h, params=p, timeout=12)\n"
             "  out['mesdp']='OK' if r.status_code < 400 else f'HTTP {r.status_code}'\n"
             "except Exception as e:\n"
             "  out['mesdp']=str(e)[:140]\n"
             "try:\n"
             "  s=smtplib.SMTP(smtp_server, smtp_port, timeout=12)\n"
-            "  if use_starttls: s.starttls()\n"
+            "  if use_starttls: s.starttls(context=ssl.create_default_context())\n"
             "  s.login(sender, password)\n"
             "  s.quit()\n"
             "  out['smtp']='OK'\n"
@@ -1409,7 +1416,7 @@ class SchedulerGui:
             return
 
         code = (
-            "import smtplib\n"
+            "import smtplib, ssl\n"
             "from email.mime.text import MIMEText\n"
             f"sender={email['sender']!r}\n"
             f"password={email['password']!r}\n"
@@ -1422,7 +1429,7 @@ class SchedulerGui:
             "msg['From']=sender\n"
             "msg['To']=', '.join(recipients)\n"
             "s=smtplib.SMTP(smtp_server, smtp_port, timeout=15)\n"
-            "if use_starttls: s.starttls()\n"
+            "if use_starttls: s.starttls(context=ssl.create_default_context())\n"
             "s.login(sender, password)\n"
             "s.sendmail(sender, recipients, msg.as_string())\n"
             "s.quit()\n"
@@ -1576,7 +1583,7 @@ class SchedulerGui:
 
         lbl_cfg = dict(text_color=TEXT_MUTED, font=(FONT_UI, 14, "bold"))
         for col, text in enumerate(["Shift", "Start (HH:MM)", "End (HH:MM)",
-                                    "Reminder (min before end)"]):
+                                    "Reminders (min before end)"]):
             ctk.CTkLabel(c, text=text, **lbl_cfg).grid(
                 row=2, column=col, padx=(0, 10), pady=(0, 6), sticky="w")
 
@@ -1585,11 +1592,11 @@ class SchedulerGui:
         entry_cfg = dict(width=104, height=36, fg_color=SURFACE_ALT, text_color=TEXT,
                          border_color=BORDER, border_width=1, corner_radius=8, font=(FONT_MONO, 14))
 
-        for ri, sn in enumerate(("morning", "evening", "night"), start=3):
+        for ri, sn in enumerate(SHIFT_NAMES, start=3):
             ctk.CTkLabel(c, text=sn.capitalize(), text_color=TEXT,
                          font=(FONT_UI, 14, "bold")).grid(
                 row=ri, column=0, padx=(0, 10), pady=(0, 8), sticky="w")
-            sv, ev, rv = tk.StringVar(), tk.StringVar(), tk.StringVar(value="30")
+            sv, ev, rv = tk.StringVar(), tk.StringVar(), tk.StringVar(value="60, 30")
             for ci, var in enumerate([sv, ev, rv], start=1):
                 e = ctk.CTkEntry(c, textvariable=var, **entry_cfg)
                 e.grid(row=ri, column=ci, padx=(0, 10), pady=(0, 8), sticky="w")
@@ -1692,6 +1699,18 @@ class SchedulerGui:
             if hasattr(self, "refresh_profile_combo"):
                 self.refresh_profile_combo.set("Custom")
 
+    @staticmethod
+    def _parse_reminder_offsets(text: str) -> list[int] | None:
+        """'60, 30' -> [60, 30] (largest first); None if any value is invalid."""
+        parts = [p for p in re.split(r"[,\s;]+", str(text).strip()) if p]
+        try:
+            values = sorted({int(p) for p in parts}, reverse=True)
+        except ValueError:
+            return None
+        if not values or any(not 0 <= v <= 720 for v in values):
+            return None
+        return values
+
     def _refresh_shift_preview(self, reminders: dict | None = None) -> None:
         if reminders is None:
             reminders = {}
@@ -1699,15 +1718,22 @@ class SchedulerGui:
                 try:
                     hh, mm  = ev.get().strip().split(":")
                     end_min = int(hh) * 60 + int(mm)
-                    offset  = int(self.shift_reminder_vars[sn].get().strip())
-                    rem     = (end_min - offset) % (24 * 60)
-                    reminders[sn] = f"{rem // 60:02d}:{rem % 60:02d}"
+                    offsets = self._parse_reminder_offsets(self.shift_reminder_vars[sn].get())
+                    if not offsets:
+                        raise ValueError
+                    times = []
+                    for offset in offsets:
+                        rem = (end_min - offset) % (24 * 60)
+                        times.append(f"{rem // 60:02d}:{rem % 60:02d}")
+                    reminders[sn] = times
                 except (ValueError, AttributeError, KeyError):
-                    reminders[sn] = "--:--"
+                    reminders[sn] = ["--:--"]
+
+        def fmt(v) -> str:
+            return " & ".join(v) if isinstance(v, (list, tuple)) else str(v)
         self.shift_preview_var.set(
-            f"Preview  ·  M {reminders.get('morning','--:--')}  "
-            f"E {reminders.get('evening','--:--')}  "
-            f"N {reminders.get('night','--:--')}")
+            f"Preview  ·  Morning {fmt(reminders.get('morning', '--:--'))}  "
+            f"·  Night {fmt(reminders.get('night', '--:--'))}")
 
     def save_shift_hours(self) -> None:
         self._sync_refresh_combo_to_vars()
@@ -1732,17 +1758,18 @@ class SchedulerGui:
             try:
                 sh, sm = sv.get().strip().split(":")
                 eh, em = ev.get().strip().split(":")
-                rm     = int(self.shift_reminder_vars[sn].get().strip())
                 sh, sm, eh, em = int(sh), int(sm), int(eh), int(em)
             except ValueError:
                 messagebox.showerror("Invalid Input",
-                    f"{sn.capitalize()}: use HH:MM format and integer reminder."); return
+                    f"{sn.capitalize()}: use HH:MM format."); return
             if not (0 <= sh <= 23 and 0 <= sm <= 59 and 0 <= eh <= 23 and 0 <= em <= 59):
                 messagebox.showerror("Invalid Time",
                     f"{sn.capitalize()}: time out of valid range."); return
-            if not (0 <= rm <= 720):
+            rm = self._parse_reminder_offsets(self.shift_reminder_vars[sn].get())
+            if not rm:
                 messagebox.showerror("Invalid Reminder",
-                    f"{sn.capitalize()}: reminder must be 0–720 min."); return
+                    f"{sn.capitalize()}: reminders must be minutes before shift end (0–720), "
+                    f"separated by commas, e.g. 60, 30."); return
             new_hours[sn] = {"start_time": f"{sh:02d}:{sm:02d}",
                               "end_time":   f"{eh:02d}:{em:02d}",
                               "reminder_minutes": rm}
@@ -1762,9 +1789,8 @@ class SchedulerGui:
             self.refresh_status()
 
     def reset_settings_to_default(self) -> None:
-        for sn, (s, e, r) in {"morning": ("07:00","15:00","30"),
-                               "evening": ("15:00","23:00","30"),
-                               "night":   ("23:00","07:00","30")}.items():
+        for sn, (s, e, r) in {"morning": ("08:00","20:00","60, 30"),
+                               "night":   ("20:00","08:00","60, 30")}.items():
             if sn in self.shift_hour_vars:
                 self.shift_hour_vars[sn][0].set(s)
                 self.shift_hour_vars[sn][1].set(e)
@@ -1820,9 +1846,9 @@ class SchedulerGui:
             "import config as cfg\n"
             "cfg.reload_config_from_disk()\n"
             "import worklog_reminder as wr\n"
-            "order=['morning','evening','night']\n"
+            "order=list(wr.SHIFT_ORDER)\n"
             "current=wr.get_auto_shift()\n"
-            "previous=order[(order.index(current)-1)%3]\n"
+            "previous=order[(order.index(current)-1)%len(order)]\n"
             "summary=wr.get_inprogress_summary() or {}\n"
             "tickets=summary.get('tickets', [])\n"
             "pending=summary.get('pending_count', len(tickets))\n"
@@ -2314,9 +2340,9 @@ def main() -> None:
         # Force UTF-8 to avoid cp1252/charmap crashes when printing emoji/text.
         try:
             if hasattr(sys.stdout, "reconfigure"):
-                sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+                sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
             if hasattr(sys.stderr, "reconfigure"):
-                sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+                sys.stderr.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
         except Exception:
             pass
 

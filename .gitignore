@@ -1,5 +1,7 @@
-# Local secrets
-config.py
+# Local secrets (config.py is a loader with no secrets and is tracked)
+app_config.json
+config.local.json
+*_config_backup.json
 
 # Python
 .venv/
