@@ -885,17 +885,18 @@ class SchedulerGui:
         words = name.split()
         initials = (words[0][:1] + (words[1][:1] if len(words) > 1 else "")).upper() or "?"
         avatar_bg = TIER_COLOURS.get(tier, TEXT_MUTED) if current else TEXT_DIM
+        # Standby (red name in the roster): amber chip with an amber ring.
         chip = ctk.CTkFrame(parent, corner_radius=15, height=30,
-                            fg_color=WARN_DIM if first else (BRAND_SOFT if current else SURFACE_ALT))
+                            fg_color=WARN_DIM if first else (BRAND_SOFT if current else SURFACE_ALT),
+                            border_width=2 if first else 0, border_color=WARN)
         ctk.CTkLabel(chip, text=initials, width=24, height=24, corner_radius=12,
                      fg_color=WARN if first else avatar_bg, text_color=ON_NAVY,
-                     font=(FONT_UI, 9, "bold")).pack(side=tk.LEFT, padx=(3, 6), pady=3)
+                     font=(FONT_UI, 9, "bold")).pack(side=tk.LEFT, padx=(5 if first else 3, 6),
+                                                     pady=5 if first else 3)
         ctk.CTkLabel(chip, text=name, height=24,
                      text_color=WARN if first else (TEXT if current else TEXT_MUTED),
-                     font=(FONT_UI, 11, "bold" if first else "normal")).pack(side=tk.LEFT, padx=(0, 10))
-        if first:
-            ctk.CTkLabel(chip, text="first contact", height=24, text_color=WARN,
-                         font=(FONT_UI, 9)).pack(side=tk.LEFT, padx=(0, 10))
+                     font=(FONT_UI, 11, "bold" if first else "normal")).pack(
+            side=tk.LEFT, padx=(0, 12 if first else 10), pady=5 if first else 0)
         return chip
 
     def _load_logo(self, height: int):
@@ -2305,7 +2306,7 @@ class SchedulerGui:
 
         self._render_roster(data.get("roster"))
         shift = str(data.get("shift") or "")
-        self.roster_note_var.set("Red name in roster = first contact")
+        self.roster_note_var.set("Highlighted = on standby this week")
 
         summary = data.get("summary")
         activity = data.get("activity") or {}
