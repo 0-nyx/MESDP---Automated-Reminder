@@ -89,10 +89,10 @@ def validate_config() -> bool:
             return False
         for key in keys:
             if key not in CONFIG[section]:
-                print(f"❌ Missing config: {section}.{key}")
+                print(f"[ERROR] Missing config: {section}.{key}")
                 return False
     if not CONFIG["email"]["recipients"]:
-        print("❌ Email recipients list is empty")
+        print("[ERROR] Email recipients list is empty")
         return False
     return True
 
@@ -100,17 +100,17 @@ def validate_config() -> bool:
 def execute_reminder(shift_name: str, final: bool = False) -> None:
     """Execute reminder for specific shift. `final` marks the last reminder of the shift."""
     if shift_name not in SHIFTS:
-        print(f"❌ Invalid shift: {shift_name}")
+        print(f"[ERROR] Invalid shift: {shift_name}")
         return
 
     shift_info = SHIFTS[shift_name]
     kind = "final" if final else "first"
-    print(f"\n⏰ [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Running {shift_name} shift reminder ({kind})...")
+    print(f"\n[RUN] [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Running {shift_name} shift reminder ({kind})...")
 
     # Pull tickets with no worklog since this shift's cutoff
     tickets = get_inprogress_tickets(worklog_cutoff(shift_name))
     if tickets is None:  # API error
-        print(f"⚠️  Skipping email send due to API error")
+        print(f"[WARN] Skipping email send due to API error")
         return
 
     # Build & send
@@ -119,21 +119,21 @@ def execute_reminder(shift_name: str, final: bool = False) -> None:
     email_result = send_email(subject, html)
 
     if email_result:
-        print(f"✅ {shift_name.capitalize()} shift reminder sent successfully ({len(tickets)} pending tickets)")
+        print(f"[OK] {shift_name.capitalize()} shift reminder sent successfully ({len(tickets)} pending tickets)")
     else:
-        print(f"❌ {shift_name.capitalize()} shift reminder FAILED")
+        print(f"[ERROR] {shift_name.capitalize()} shift reminder FAILED")
 
 
 def schedule_reminders() -> None:
     """Schedule reminders for all shifts."""
-    print(f"\n🕐 Scheduler started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"\nScheduler started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("   Scheduled reminders:")
 
     for shift, times in SHIFT_REMINDER_TIMES.items():
         for i, time_str in enumerate(times):
             final = len(times) > 1 and i == len(times) - 1
             schedule.every().day.at(time_str).do(execute_reminder, shift_name=shift, final=final)
-            print(f"   • {shift.capitalize()}: {time_str}{' (final)' if final else ''}")
+            print(f"   - {shift.capitalize()}: {time_str}{' (final)' if final else ''}")
 
     print("\n   Press Ctrl+C to stop scheduler\n")
 
@@ -143,7 +143,7 @@ def schedule_reminders() -> None:
             schedule.run_pending()
             time.sleep(1)  # Check every second
     except KeyboardInterrupt:
-        print("\n\n🛑 Scheduler stopped by user.\n")
+        print("\n\nScheduler stopped by user.\n")
         sys.exit(0)
 
 
@@ -195,10 +195,10 @@ def save_preview_html(file_path: str, html: str) -> bool:
     try:
         with open(file_path, "w", encoding="utf-8") as f:
             f.write(html)
-        print(f"✅ Preview HTML saved: {file_path}")
+        print(f"[OK] Preview HTML saved: {file_path}")
         return True
     except OSError as e:
-        print(f"❌ Failed to save preview HTML: {e}")
+        print(f"[ERROR] Failed to save preview HTML: {e}")
         return False
 
 
@@ -316,14 +316,14 @@ def load_shift_hours() -> Tuple[Dict[str, Tuple[int, int]], Dict[str, Tuple[str,
         with open(SHIFT_SETTINGS_FILE, "r", encoding="utf-8") as f:
             payload = json.load(f)
     except (OSError, json.JSONDecodeError) as e:
-        print(f"⚠️ Failed to read shift settings file: {e}. Using default shift hours.")
+        print(f"[WARN] Failed to read shift settings file: {e}. Using default shift hours.")
         return shift_hours, shift_times, reminder_offsets
 
     raw_hours = payload.get("shift_hours", {}) if isinstance(payload, dict) else {}
     if isinstance(raw_hours, dict) and "evening" in raw_hours:
         # Old 3-shift (8-hour) settings: those hours no longer match the
         # 12-hour roster, so fall back to the defaults until the GUI saves anew.
-        print("⚠️ Shift settings are in the old 3-shift format; using default 2-shift hours "
+        print("[WARN] Shift settings are in the old 3-shift format; using default 2-shift hours "
               "(08:00-20:00 / 20:00-08:00). Re-save shift settings in the GUI to customise.")
         return shift_hours, shift_times, reminder_offsets
 
@@ -568,11 +568,11 @@ def get_request_worklogs(request_id: int, auth_token: str, base_url: str) -> Opt
 
         return worklogs
     except requests.exceptions.Timeout:
-        print(f"⚠️ Worklog API timeout for #{request_id}")
+        print(f"[WARN] Worklog API timeout for #{request_id}")
     except requests.exceptions.RequestException as e:
-        print(f"⚠️ Worklog API error for #{request_id}: {e}")
+        print(f"[WARN] Worklog API error for #{request_id}: {e}")
     except Exception as e:
-        print(f"⚠️ Worklog check error for #{request_id}: {e}")
+        print(f"[WARN] Worklog check error for #{request_id}: {e}")
 
     return None
 
@@ -610,7 +610,7 @@ def debug_worklog_ticket(request_id: int) -> bool:
     auth_token = CONFIG["mesdp"]["auth_token"]
     worklogs = get_request_worklogs(request_id, auth_token, base_url)
     if worklogs is None:
-        print(f"❌ Failed to fetch worklogs for #{request_id}")
+        print(f"[ERROR] Failed to fetch worklogs for #{request_id}")
         return False
 
     print(f"\nWorklog debug for #{request_id}")
@@ -756,7 +756,7 @@ def get_shift_roster(shift_name: str):
     for label, res in (("On shift", results[0]), ("Next shift", results[1])):
         if res:
             names = ", ".join(p["name"] + (" (first contact)" if p["first_contact"] else "") for p in res["people"])
-            print(f"👥 {label} ({res['shift']}, {res['date']:%d %b}): {names or 'nobody rostered'}")
+            print(f"[roster] {label} ({res['shift']}, {res['date']:%d %b}): {names or 'nobody rostered'}")
     return {"current": results[0], "next": results[1]}
 
 
@@ -810,7 +810,7 @@ def get_shift_activity(shift_name: str) -> Optional[Dict]:
     }
     if all(v is None for v in counts.values()):
         return None
-    print(f"📈 Since {start:%H:%M}: {counts['opened']} opened, {counts['closed']} closed | "
+    print(f"[counts] Since {start:%H:%M}: {counts['opened']} opened, {counts['closed']} closed | "
           f"queue: {counts['in_progress']} in progress, {counts['on_hold']} on hold")
     return {**counts, "since": start, "until": now}
 
@@ -1249,9 +1249,9 @@ def send_email(subject: str, html_body: str) -> bool:
             if "@" in email_addr:
                 valid_recipients.append(email_addr)
             else:
-                print(f"⚠️  Skipping invalid recipient: {addr!r}")
+                print(f"[WARN] Skipping invalid recipient: {addr!r}")
         if not valid_recipients:
-            print("❌ No valid recipients — aborting email send.")
+            print("[ERROR] No valid recipients - aborting email send.")
             return False
 
         msg            = MIMEMultipart("alternative")
@@ -1266,18 +1266,18 @@ def send_email(subject: str, html_body: str) -> bool:
             server.login(CONFIG["email"]["sender"], CONFIG["email"]["password"])
             server.sendmail(CONFIG["email"]["sender"], valid_recipients, msg.as_string())
 
-        print("✅ Email sent successfully.")
+        print("[OK] Email sent successfully.")
         return True
 
     except smtplib.SMTPAuthenticationError as e:
-        print(f"❌ SMTP Auth Failed: Verify credentials/app password or SMTP AUTH policy")
+        print(f"[ERROR] SMTP Auth Failed: Verify credentials/app password or SMTP AUTH policy")
         print(f"   Error: {e}")
         return False
     except smtplib.SMTPException as e:
-        print(f"❌ SMTP Error: {e}")
+        print(f"[ERROR] SMTP Error: {e}")
         return False
     except Exception as e:
-        print(f"❌ Email Error: {e}")
+        print(f"[ERROR] Email Error: {e}")
         return False
 
 
@@ -1290,13 +1290,13 @@ def send_teams(payload: Dict) -> bool:
             timeout=REQUEST_TIMEOUT
         )
         if resp.status_code == 200:
-            print("✅ Teams message sent.")
+            print("[OK] Teams message sent.")
             return True
         else:
-            print(f"❌ Teams error {resp.status_code}")
+            print(f"[ERROR] Teams error {resp.status_code}")
             return False
     except Exception as e:
-        print(f"❌ Teams error: {e}")
+        print(f"[ERROR] Teams error: {e}")
         return False
 
 
@@ -1308,7 +1308,7 @@ def main():
     """Main workflow."""
     # Validate config
     if not validate_config():
-        print("\n❌ Config validation failed. Exiting.\n")
+        print("\n[ERROR] Config validation failed. Exiting.\n")
         sys.exit(1)
 
     # Parse arguments
@@ -1336,7 +1336,7 @@ def main():
     _base_dir = os.path.abspath(os.path.dirname(__file__))
     _preview_path = os.path.abspath(os.path.join(_base_dir, args.preview_file))
     if not _preview_path.startswith(_base_dir + os.sep) and _preview_path != _base_dir:
-        print(f"❌ Invalid --preview-file path: must be inside the project directory.")
+        print(f"[ERROR] Invalid --preview-file path: must be inside the project directory.")
         sys.exit(1)
     args.preview_file = _preview_path
 
@@ -1350,25 +1350,25 @@ def main():
     shift_info = SHIFTS[auto_shift]
 
     print(f"\n{'='*55}")
-    print(f"  MESDP Worklog Reminder — {shift_info['label']}")
+    print(f"  MESDP Worklog Reminder - {shift_info['label']}")
     print(f"  Run time: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print(f"{'='*55}\n")
 
     # Pull tickets
     if args.sandbox:
-        print("🧪 Sandbox mode enabled: using local sample tickets (no API call).")
+        print("[sandbox] Sandbox mode enabled: using local sample tickets (no API call).")
         tickets = get_sample_tickets()
     else:
-        print("📡 Connecting to MESDP API...")
+        print("Connecting to MESDP API...")
         cutoff = worklog_cutoff(auto_shift)
         print(f"   Worklog counted from {cutoff:%d %b %H:%M}")
         tickets = get_inprogress_tickets(cutoff)
 
     if tickets is None:
-        print("❌ Failed to pull tickets. Exiting.")
+        print("[ERROR] Failed to pull tickets. Exiting.")
         sys.exit(1)
 
-    print(f"⚠️  {len(tickets)} ticket(s) have no worklog for this shift yet.")
+    print(f"[WARN] {len(tickets)} ticket(s) have no worklog for this shift yet.")
 
     # Build & send
     activity = None if args.sandbox else get_shift_activity(auto_shift)
@@ -1378,13 +1378,13 @@ def main():
     if args.sandbox:
         email_result = False
         teams_result = False
-        email_status_text = "⏸️  Skipped (sandbox)"
-        print("⏸️  Sandbox mode: email sending skipped.")
+        email_status_text = "Skipped (sandbox)"
+        print("[skip] Sandbox mode: email sending skipped.")
     elif args.dry_run:
         email_result = False
         teams_result = False
-        email_status_text = "⏸️  Skipped (dry-run)"
-        print("⏸️  Dry-run mode: email sending skipped.")
+        email_status_text = "Skipped (dry-run)"
+        print("[skip] Dry-run mode: email sending skipped.")
     else:
         email_result = send_email(subject, html)
         teams_result = False  # Teams disabled
@@ -1392,12 +1392,12 @@ def main():
 
     # Status report
     print("\n" + "="*55)
-    print("  📊 EXECUTION SUMMARY")
+    print("  EXECUTION SUMMARY")
     print(f"  Shift: {shift_info['label']}")
     print(f"  Tickets pending: {len(tickets)}")
-    print(f"  Preview generated: {'✅ Yes' if preview_result else '❌ No'}")
+    print(f"  Preview generated: {'Yes' if preview_result else 'No'}")
     print(f"  Email sent: {email_status_text}")
-    print(f"  Teams sent: {'✅ Yes' if teams_result else '⏸️  Disabled'}")
+    print(f"  Teams sent: {'Yes' if teams_result else 'Disabled'}")
     print("="*55 + "\n")
 
     if args.sandbox or args.dry_run:
