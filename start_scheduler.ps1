@@ -43,7 +43,8 @@ try {
             $_.CommandLine -and
             (
                 $_.CommandLine -like "*worklog_reminder.py*--schedule*" -or
-                $_.CommandLine -like "*MESDP Scheduler Control.exe*--schedule*"
+                $_.CommandLine -like "*MESDP Scheduler Control.exe*--schedule*" -or
+                $_.CommandLine -like "*MESDP Worklog Reminder.exe*--schedule*"
             ) -and (
                 $_.CommandLine -like "*$projectRoot*" -or
                 $_.CommandLine -like "*$parentRoot*"

@@ -17,7 +17,8 @@ try {
             $_.CommandLine -and
             (
                 $_.CommandLine -like "*worklog_reminder.py*--schedule*" -or
-                $_.CommandLine -like "*MESDP Scheduler Control.exe*--schedule*"
+                $_.CommandLine -like "*MESDP Scheduler Control.exe*--schedule*" -or
+                $_.CommandLine -like "*MESDP Worklog Reminder.exe*--schedule*"
             ) -and (
                 $_.CommandLine -like "*$projectRoot*" -or
                 $_.CommandLine -like "*$parentRoot*"
@@ -57,7 +58,7 @@ if ($queryWarning) {
 Write-Output ""
 Write-Output "Last stdout lines:"
 if (Test-Path $stdoutLog) {
-    Get-Content $stdoutLog -Tail $Tail
+    Get-Content $stdoutLog -Tail $Tail -Encoding UTF8
 } else {
     Write-Output "No stdout log found: $stdoutLog"
 }
@@ -65,7 +66,7 @@ if (Test-Path $stdoutLog) {
 Write-Output ""
 Write-Output "Last stderr lines:"
 if (Test-Path $stderrLog) {
-    Get-Content $stderrLog -Tail $Tail
+    Get-Content $stderrLog -Tail $Tail -Encoding UTF8
 } else {
     Write-Output "No stderr log found: $stderrLog"
 }
@@ -76,5 +77,5 @@ if ($Follow) {
     if (-not (Test-Path $stdoutLog)) {
         New-Item -Path $stdoutLog -ItemType File | Out-Null
     }
-    Get-Content $stdoutLog -Wait -Tail 20
+    Get-Content $stdoutLog -Wait -Tail 20 -Encoding UTF8
 }

@@ -388,7 +388,8 @@ class SchedulerGui:
             "$_.CommandLine -and "
             "("
             "$_.CommandLine -like '*worklog_reminder.py*--schedule*' -or "
-            "$_.CommandLine -like '*MESDP Scheduler Control.exe*--schedule*'"
+            "$_.CommandLine -like '*MESDP Scheduler Control.exe*--schedule*' -or "
+            "$_.CommandLine -like '*MESDP Worklog Reminder.exe*--schedule*'"
             ") -and ("
             "$_.CommandLine -like \"*$projectRoot*\" -or "
             "$_.CommandLine -like \"*$parentRoot*\""
@@ -2641,7 +2642,7 @@ def main() -> None:
 
         import worklog_reminder as wr
         if not wr.validate_config():
-            print("\n❌ Config validation failed. Exiting.\n")
+            print("\n[ERROR] Config validation failed. Exiting.\n")
             sys.exit(1)
         wr.schedule_reminders()
         return
