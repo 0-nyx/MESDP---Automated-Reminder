@@ -1339,19 +1339,10 @@ class SchedulerGui:
         self.config_window = win
 
         if force:
+            # No modal messagebox here: shown before the form is built, it left
+            # the setup window blank in the packaged exe. The notice is part of
+            # the form instead.
             win.protocol("WM_DELETE_WINDOW", self.root.destroy)
-            messagebox.showinfo(
-                "Setup Required",
-                "Please complete setup first.\n\n"
-                "Required:\n"
-                "- MESDP URL\n"
-                "- MESDP Token\n"
-                "- SMTP Server\n"
-                "- SMTP Port\n"
-                "- Email sender\n"
-                "- Email password\n"
-                "- Receiver email(s)"
-            )
 
         card = ctk.CTkFrame(win, fg_color=SURFACE, corner_radius=12,
                             border_width=1, border_color=BORDER)
@@ -1363,8 +1354,11 @@ class SchedulerGui:
         ctk.CTkLabel(frame, text="FIRST-TIME SETUP" if force else "APP CONFIGURATION", text_color=TEXT,
                      font=(FONT_UI, 18, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(4, 2))
         ctk.CTkLabel(frame,
-                     text="Configure MESDP and SMTP details to enable reminders.",
-                     text_color=TEXT_MUTED, font=(FONT_UI, 12)).grid(
+                     text=("Setup required: no saved settings for this Windows user. Fill in every field "
+                           "and add at least one receiver, then click SAVE CONFIG." if force else
+                           "Configure MESDP and SMTP details to enable reminders."),
+                     text_color=WARN if force else TEXT_MUTED, font=(FONT_UI, 12, "bold" if force else "normal"),
+                     wraplength=780, justify="left").grid(
             row=1, column=0, columnspan=2, sticky="w", pady=(0, 16))
 
         lbl = dict(text_color=TEXT_MUTED, font=(FONT_UI, 12, "bold"))
