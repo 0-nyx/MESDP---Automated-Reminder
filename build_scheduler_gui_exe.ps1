@@ -5,6 +5,7 @@ $pythonExe = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $guiScript = Join-Path $projectRoot "scheduler_gui.py"
 $schedulerScript = Join-Path $projectRoot "worklog_reminder.py"
 $iconFile = Join-Path $projectRoot "dist\app_icon.ico"
+$logoFile = Join-Path $projectRoot "assets\cll_logo.png"
 $pythonRoot = (& $pythonExe -c "import sys; print(sys.base_prefix)")
 
 # Python <= 3.12 ships Tcl/Tk 8.6; Python 3.13+ ships Tcl/Tk 9.0.
@@ -88,10 +89,12 @@ try {
         --hidden-import tkinter.font `
         --hidden-import tkinter.constants `
         --collect-all customtkinter `
+        --hidden-import pystray._win32 `
         --add-binary "$tkinterPyd;." `
         --add-binary "$tclDll;." `
         --add-binary "$tkDll;." `
         --add-data "$iconFile;." `
+        --add-data "$logoFile;assets" `
         --add-data "$tkinterLibrary;tkinter" `
         --add-data "$($pythonRoot)\tcl;tcl" `
         "$guiScript"
