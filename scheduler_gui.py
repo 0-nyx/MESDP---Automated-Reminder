@@ -161,6 +161,7 @@ class SchedulerGui:
         self.cfg_email_receiver_input_var = tk.StringVar()
         self.cfg_email_receivers_list: list[str] = []
         self.cfg_receiver_listbox: tk.Listbox | None = None
+        self.cfg_roster_path_var       = tk.StringVar()
         self._has_saved_mesdp_token    = False
         self._has_saved_email_password = False
         self.setup_required            = not runtime_config_ready(CONFIG)
@@ -1326,10 +1327,19 @@ class SchedulerGui:
             self.cfg_email_receivers_list = []
             self.cfg_email_receivers_var.set("")
         self.cfg_email_receiver_input_var.set("")
+        roster_cfg = CONFIG.get("roster", {}) if isinstance(CONFIG, dict) else {}
+        self.cfg_roster_path_var.set(str((roster_cfg or {}).get("path", "") or ""))
 
         win = ctk.CTkToplevel(self.root)
         win.title("First-Time Setup" if force else "App Configuration")
-        cfg_width, cfg_height = 900, 700
+        # Fit short screens (e.g. a VM console): the fields scroll and the
+        # action buttons stay pinned at the bottom, so nothing is cut off.
+        cfg_width, cfg_height = 900, 750
+        try:
+            scale = float(win._get_window_scaling())
+            cfg_height = max(460, min(cfg_height, int(self.root.winfo_screenheight() / scale) - 90))
+        except Exception:
+            pass
         self._center_toplevel(win, cfg_width, cfg_height)
         win.resizable(False, False)
         win.configure(fg_color=BG)
@@ -1347,9 +1357,14 @@ class SchedulerGui:
         card = ctk.CTkFrame(win, fg_color=SURFACE, corner_radius=12,
                             border_width=1, border_color=BORDER)
         card.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
-        # Inner frame keeps the content off the card edge.
-        frame = ctk.CTkFrame(card, fg_color="transparent")
-        frame.pack(fill=tk.BOTH, expand=True, padx=28, pady=(20, 22))
+        # Footer with the action buttons is packed first so it always keeps
+        # its space at the bottom; the fields above it scroll.
+        footer = ctk.CTkFrame(card, fg_color="transparent")
+        footer.pack(side=tk.BOTTOM, fill=tk.X, padx=28, pady=(10, 18))
+        frame = ctk.CTkScrollableFrame(card, fg_color="transparent",
+                                       scrollbar_button_color=BORDER,
+                                       scrollbar_button_hover_color=BORDER_LT)
+        frame.pack(fill=tk.BOTH, expand=True, padx=(20, 8), pady=(16, 0))
 
         ctk.CTkLabel(frame, text="FIRST-TIME SETUP" if force else "APP CONFIGURATION", text_color=TEXT,
                      font=(FONT_UI, 18, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(4, 2))
@@ -1512,8 +1527,29 @@ class SchedulerGui:
             checkbox_height=18,
         ).grid(row=tls_row, column=1, sticky="w", pady=(0, 8))
 
-        btn_wrap = ctk.CTkFrame(frame, fg_color="transparent")
-        btn_wrap.grid(row=tls_row + 1, column=0, columnspan=2, sticky="w")
+        # Duty roster workbook (optional): shows who is on shift in the email
+        # and on the dashboard.
+        roster_row = tls_row + 1
+        ctk.CTkLabel(frame, text="Roster File", **lbl).grid(
+            row=roster_row, column=0, sticky="w", pady=(0, 12), padx=(0, 12)
+        )
+        roster_wrap = ctk.CTkFrame(frame, fg_color="transparent")
+        roster_wrap.grid(row=roster_row, column=1, sticky="w", pady=(0, 12))
+        roster_entry = ctk.CTkEntry(roster_wrap, textvariable=self.cfg_roster_path_var,
+                                    **{**ent, "width": 350},
+                                    placeholder_text="Optional: upload the shift roster (.xlsx)")
+        roster_entry.pack(side=tk.LEFT, padx=(0, 8))
+        for text, width, cmd in (("UPLOAD", 80, self._upload_roster_file),
+                                 ("CLEAR", 70, lambda: self.cfg_roster_path_var.set(""))):
+            ctk.CTkButton(
+                roster_wrap, text=text, width=width, height=38,
+                fg_color=SURFACE_ALT, hover_color=BORDER_LT, text_color=TEXT,
+                border_width=1, border_color=BORDER, corner_radius=8,
+                font=(FONT_UI, 11, "bold"), command=cmd,
+            ).pack(side=tk.LEFT, padx=(0, 8))
+
+        btn_wrap = ctk.CTkFrame(footer, fg_color="transparent")
+        btn_wrap.pack(side=tk.TOP, anchor="w")
         ctk.CTkButton(
             btn_wrap,
             text="TEST CONNECTION",
@@ -1572,8 +1608,8 @@ class SchedulerGui:
             ).pack(side=tk.LEFT, padx=(0, 8))
 
         if not force:
-            btn_wrap2 = ctk.CTkFrame(frame, fg_color="transparent")
-            btn_wrap2.grid(row=tls_row + 2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+            btn_wrap2 = ctk.CTkFrame(footer, fg_color="transparent")
+            btn_wrap2.pack(side=tk.TOP, anchor="w", pady=(6, 0))
             ctk.CTkButton(
                 btn_wrap2,
                 text="💾  BACKUP CONFIG",
@@ -1605,6 +1641,37 @@ class SchedulerGui:
 
             # Recenter after widgets are laid out (handles DPI scaling correctly).
             win.after(30, lambda: self._center_existing_toplevel(win))
+
+    def _upload_roster_file(self) -> None:
+        """Copy a roster workbook into the app's data folder and point the
+        config at the copy, so the original can be moved or deleted. Upload
+        again whenever the schedule changes."""
+        from tkinter import filedialog
+        import shutil
+        parent = self.config_window if (self.config_window and self.config_window.winfo_exists()) else self.root
+        src = filedialog.askopenfilename(
+            parent=parent,
+            title="Upload Shift Roster (Excel)",
+            filetypes=[("Excel workbook", "*.xlsx *.xlsm"), ("All files", "*.*")],
+        )
+        if not src:
+            return
+        dest_dir = os.path.join(os.path.dirname(USER_CONFIG_FILE), "roster")
+        dest = os.path.join(dest_dir, os.path.basename(src))
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+            if os.path.normcase(os.path.abspath(src)) != os.path.normcase(os.path.abspath(dest)):
+                shutil.copy2(src, dest)
+        except OSError as e:
+            messagebox.showerror("Upload Failed",
+                                 f"Could not copy the roster file:\n{e}\n\n"
+                                 "If it is open in Excel, close it and try again.", parent=parent)
+            return
+        self.cfg_roster_path_var.set(os.path.normpath(dest))
+        messagebox.showinfo("Roster Uploaded",
+                            f"Roster uploaded:\n{os.path.basename(dest)}\n\n"
+                            "Click SAVE CONFIG to use it. Upload again whenever the schedule changes.",
+                            parent=parent)
 
     def _refresh_receiver_listbox(self) -> None:
         if not self.cfg_receiver_listbox:
@@ -1691,7 +1758,12 @@ class SchedulerGui:
         if bad:
             return {}, f"Invalid receiver email(s): {', '.join(bad)}"
 
+        roster_path = self.cfg_roster_path_var.get().strip().strip('"')
+        if roster_path and not os.path.isfile(roster_path):
+            return {}, f"Roster file not found:\n{roster_path}\n\nPick the file again or click CLEAR."
+
         payload = {
+            "roster": {"path": roster_path},
             "mesdp": {
                 "base_url": base_url.rstrip("/"),
                 "auth_token": token,
@@ -1853,7 +1925,11 @@ class SchedulerGui:
         else:
             self.cfg_email_receivers_list = []
         self._refresh_receiver_listbox()
-        
+
+        roster_cfg = data.get("roster", {}) if isinstance(data, dict) else {}
+        if isinstance(roster_cfg, dict) and roster_cfg.get("path"):
+            self.cfg_roster_path_var.set(str(roster_cfg.get("path")))
+
         messagebox.showinfo("Config Restored", "Configuration loaded from backup.\nFields populated. Review and save when ready.", parent=self.config_window)
 
     def _save_runtime_config(self, force: bool = False) -> None:

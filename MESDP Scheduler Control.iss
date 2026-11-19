@@ -1,12 +1,18 @@
+; Bump this for every release so the installed version is visible in
+; Windows "Installed apps" and in the setup file name.
+#define MyAppVersion "1.1.0"
+
 [Setup]
 AppId={{9A4C1B35-5CB5-4F73-9E4E-B1EBA988F4DF}
 AppName=CLL MESDP Ticketing Worklog
-AppVersion=1.0.0
+AppVersion={#MyAppVersion}
+VersionInfoVersion={#MyAppVersion}
+UninstallDisplayIcon={app}\MESDP Scheduler Control.exe
 AppPublisher=Jijoi.Inc
 DefaultDirName={autopf}\CLL\MESDP Scheduler Control
 DefaultGroupName=CLL MESDP Ticketing Worklog
 OutputDir=dist
-OutputBaseFilename=MESDP_Scheduler_Control_Setup
+OutputBaseFilename=MESDP_Scheduler_Control_Setup_v{#MyAppVersion}
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
@@ -29,6 +35,12 @@ Name: "{autodesktop}\CLL MESDP Ticketing Worklog"; Filename: "{app}\MESDP Schedu
 [Run]
 Filename: "{app}\MESDP Scheduler Control.exe"; Description: "Launch CLL MESDP Ticketing Worklog"; Flags: nowait postinstall skipifsilent
 
+[UninstallRun]
+; Stop the background scheduler too, otherwise it keeps sending reminders
+; after the app has been removed. Settings in %APPDATA%\CLL MESDP are kept.
+Filename: "{sys}\taskkill.exe"; Parameters: "/F /T /IM ""MESDP Worklog Reminder.exe"""; Flags: runhidden waituntilterminated; RunOnceId: "StopScheduler"
+Filename: "{sys}\taskkill.exe"; Parameters: "/F /T /IM ""MESDP Scheduler Control.exe"""; Flags: runhidden waituntilterminated; RunOnceId: "StopApp"
+
 [Code]
 var
 	MaintenancePage: TInputOptionWizardPage;
@@ -36,6 +48,19 @@ var
 	ExistingUninstallCmd: string;
 	ExistingInstallDir: string;
 	SelectedMode: string;
+	SchedulerWasRunning: Boolean;
+
+function IsProcessRunning(const ExeName: string): Boolean;
+var
+	ExecCode: Integer;
+begin
+	{ tasklist cuts the image name column at 25 characters, so
+	  "MESDP Worklog Reminder.exe" (26) shows as "...Reminder.ex".
+	  Match on the name without ".exe" instead. }
+	Result := Exec(ExpandConstant('{cmd}'),
+		'/C tasklist /FI "IMAGENAME eq ' + ExeName + '" /NH | find /I "' + ChangeFileExt(ExeName, '') + '"',
+		'', SW_HIDE, ewWaitUntilTerminated, ExecCode) and (ExecCode = 0);
+end;
 
 function TryGetExistingInstallInfo(var UninstallCmd: string; var InstallDir: string): Boolean;
 var
@@ -144,9 +169,29 @@ var
 begin
 	if CurStep = ssInstall then
 	begin
-		{ Kill any running instance before installing }
-		Exec('taskkill.exe', '/F /IM "MESDP Scheduler Control.exe"', '', SW_HIDE, ewNoWait, ExecCode);
-		Sleep(500);
+		{ Stop the app and the background scheduler so their files can be
+		  replaced. Remember whether the scheduler was running so it can be
+		  started again after the update and reminders do not silently stop. }
+		SchedulerWasRunning := IsProcessRunning('MESDP Worklog Reminder.exe');
+		if SchedulerWasRunning then
+			Log('Scheduler was running: stopping it and will restart after install.')
+		else
+			Log('Scheduler was not running.');
+		Exec('taskkill.exe', '/F /T /IM "MESDP Worklog Reminder.exe"', '', SW_HIDE, ewWaitUntilTerminated, ExecCode);
+		Exec('taskkill.exe', '/F /T /IM "MESDP Scheduler Control.exe"', '', SW_HIDE, ewWaitUntilTerminated, ExecCode);
+		Sleep(1000);
+	end;
+
+	if (CurStep = ssPostInstall) and SchedulerWasRunning then
+	begin
+		{ Run as the signed-in user so logs and the PID file go to that
+		  user's %APPDATA%, not the elevated installer's. }
+		if ExecAsOriginalUser('powershell.exe',
+			'-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + ExpandConstant('{app}') + '\start_scheduler.ps1"',
+			ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, ExecCode) then
+			Log('Scheduler restart exit code: ' + IntToStr(ExecCode))
+		else
+			Log('Scheduler restart could not be launched.');
 	end;
 
 	if (CurStep <> ssInstall) or (SelectedMode <> 'reinstall') then

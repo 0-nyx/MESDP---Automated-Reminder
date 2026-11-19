@@ -39,8 +39,18 @@ if (-not $running) {
     exit 0
 }
 
+$failed = @()
 $running | ForEach-Object {
-    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-    Write-Output "Stopped scheduler PID: $($_.ProcessId)"
+    $schedPid = $_.ProcessId
+    Stop-Process -Id $schedPid -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 500
+    if (Get-Process -Id $schedPid -ErrorAction SilentlyContinue) {
+        # Typically access denied: the scheduler was started as Administrator.
+        Write-Output "Could not stop scheduler PID: $schedPid (try again as Administrator)"
+        $failed += $schedPid
+    } else {
+        Write-Output "Stopped scheduler PID: $schedPid"
+    }
 }
+if ($failed.Count -gt 0) { exit 1 }
 Remove-Item $pidFile -Force -ErrorAction SilentlyContinue
