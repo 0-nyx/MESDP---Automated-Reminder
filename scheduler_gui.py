@@ -162,6 +162,7 @@ class SchedulerGui:
         self.cfg_email_receivers_list: list[str] = []
         self.cfg_receiver_listbox: tk.Listbox | None = None
         self.cfg_roster_path_var       = tk.StringVar()
+        self._roster_refreshed_at      = 0.0   # time of the last roster-only refresh
         self._has_saved_mesdp_token    = False
         self._has_saved_email_password = False
         self.setup_required            = not runtime_config_ready(CONFIG)
@@ -1954,6 +1955,7 @@ class SchedulerGui:
             self.setup_required = False
         if force or runtime_config_ready(CONFIG):
             self.refresh_status()
+            self._refresh_roster_only()
 
     def _backup_config(self) -> None:
         from tkinter import filedialog
@@ -2293,6 +2295,56 @@ class SchedulerGui:
     DATA_TIMEOUT_SEC = 240
     DATA_MIN_INTERVAL_SEC = 300
 
+    # Builds `ro` (the roster payload for _render_roster) for `shift`; shared
+    # by the full dashboard pull and the quick roster-only refresh.
+    _ROSTER_SNIPPET = (
+        "try:\n"
+        "    roster = wr.get_shift_roster(shift)\n"
+        "except Exception:\n"
+        "    roster = wr._ROSTER_UNAVAILABLE\n"
+        "def _r(x):\n"
+        "    if not isinstance(x, dict):\n"
+        "        return None\n"
+        "    return {'shift': x.get('shift'), 'date': str(x.get('date') or ''),\n"
+        "            'people': [{'name': p.get('name'), 'tier': p.get('tier'),\n"
+        "                        'first_contact': bool(p.get('first_contact'))} for p in x.get('people', [])]}\n"
+        "if isinstance(roster, dict):\n"
+        "    ro = {'current': _r(roster.get('current')), 'next': _r(roster.get('next'))}\n"
+        "else:\n"
+        "    ro = None if roster is None else {'unavailable': True}\n"
+    )
+
+    def _refresh_roster_only(self) -> None:
+        """Re-read just the roster (a local Excel file, a few seconds) so a
+        newly uploaded roster shows at once instead of after the next ticket
+        data pull, which can be 5+ minutes away."""
+        self._render_roster(None, loading=True)
+        self._roster_refreshed_at = time.time()
+        code = (
+            "import json, sys\n"
+            f"sys.path.insert(0, {self.project_root!r})\n"
+            "import config as cfg\n"
+            "cfg.reload_config_from_disk()\n"
+            "import worklog_reminder as wr\n"
+            "shift = wr.get_auto_shift()\n"
+            + self._ROSTER_SNIPPET +
+            "print(json.dumps({'roster': ro}))\n"
+        )
+
+        def worker() -> None:
+            rc, out = self._run_python_inline(code, timeout_sec=60)
+            roster = "error"
+            for line in reversed((out or "").splitlines()):
+                line = line.strip()
+                if line.startswith("{"):
+                    try:
+                        roster = json.loads(line).get("roster")
+                        break
+                    except json.JSONDecodeError:
+                        continue
+            self.root.after(0, lambda: self._render_roster(roster))
+        threading.Thread(target=worker, daemon=True).start()
+
     def _fetch_dashboard_data(self) -> dict:
         code = (
             "import json, sys\n"
@@ -2305,20 +2357,7 @@ class SchedulerGui:
             "cutoff = wr.worklog_cutoff(shift)\n"
             "summary = wr.get_inprogress_summary(cutoff)\n"
             "activity = wr.get_shift_activity(shift) if summary is not None else None\n"
-            "try:\n"
-            "    roster = wr.get_shift_roster(shift)\n"
-            "except Exception:\n"
-            "    roster = wr._ROSTER_UNAVAILABLE\n"
-            "def _r(x):\n"
-            "    if not isinstance(x, dict):\n"
-            "        return None\n"
-            "    return {'shift': x.get('shift'), 'date': str(x.get('date') or ''),\n"
-            "            'people': [{'name': p.get('name'), 'tier': p.get('tier'),\n"
-            "                        'first_contact': bool(p.get('first_contact'))} for p in x.get('people', [])]}\n"
-            "if isinstance(roster, dict):\n"
-            "    ro = {'current': _r(roster.get('current')), 'next': _r(roster.get('next'))}\n"
-            "else:\n"
-            "    ro = None if roster is None else {'unavailable': True}\n"
+            + self._ROSTER_SNIPPET +
             "print(json.dumps({\n"
             "    'shift': shift, 'shift_start': start.strftime('%H:%M'), 'cutoff': cutoff.strftime('%H:%M'),\n"
             "    'summary': None if summary is None else {\n"
@@ -2364,9 +2403,14 @@ class SchedulerGui:
         self.last_data_at = time.time()
         stamp = datetime.now().strftime("%H:%M")
 
+        # A pull that began before the last config save read the old settings;
+        # keep the roster the quick refresh already showed for the new ones.
+        roster_is_current = data.get("_started_at", 0) >= self._roster_refreshed_at
+
         if "error" in data:
             self._set_kpis({})
-            self._render_roster("error")
+            if roster_is_current:
+                self._render_roster("error")
             self.data_updated_var.set(f"Last attempt {stamp}")
             self.table_empty_var.set("Could not reach MESDP. Check the network / VPN, then press Refresh.")
             self._update_ticket_table([])
@@ -2374,7 +2418,8 @@ class SchedulerGui:
             self._set_output(f"{self.latest_monitor_output}\n\n[dashboard data]\n{data['error']}")
             return
 
-        self._render_roster(data.get("roster"))
+        if roster_is_current:
+            self._render_roster(data.get("roster"))
         shift = str(data.get("shift") or "")
         self.roster_note_var.set("Highlighted = on standby this week")
 
@@ -2806,11 +2851,14 @@ class SchedulerGui:
                 self.table_empty_var.set("Loading ticket data from MESDP… (about a minute)")
             self.data_updated_var.set("Loading…")
 
+            started = time.time()
+
             def data_worker() -> None:
                 try:
                     data = self._fetch_dashboard_data()
                 except Exception as exc:
                     data = {"error": str(exc)}
+                data["_started_at"] = started
                 self.root.after(0, lambda: self._apply_dashboard_data(data))
             threading.Thread(target=data_worker, daemon=True).start()
 

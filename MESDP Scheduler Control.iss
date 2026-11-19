@@ -1,6 +1,6 @@
 ; Bump this for every release so the installed version is visible in
 ; Windows "Installed apps" and in the setup file name.
-#define MyAppVersion "1.1.0"
+#define MyAppVersion "1.1.1"
 
 [Setup]
 AppId={{9A4C1B35-5CB5-4F73-9E4E-B1EBA988F4DF}
