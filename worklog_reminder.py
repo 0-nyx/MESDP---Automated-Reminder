@@ -110,7 +110,8 @@ def execute_reminder(shift_name: str, final: bool = False) -> None:
     # Pull tickets with no worklog since this shift's cutoff
     tickets = get_inprogress_tickets(worklog_cutoff(shift_name))
     if tickets is None:  # API error
-        print(f"[WARN] Skipping email send due to API error")
+        print(f"[WARN] Skipping reminder due to API error")
+        send_api_alert(shift_info, final)
         return
 
     # Build & send
@@ -390,6 +391,62 @@ def is_pm_ticket(req: Dict) -> bool:
     return str(ticket_severity(req)).strip().upper() == "PM"
 
 
+# Details of the most recent MESDP API failure, used for the alert email.
+_last_api_error: Dict = {}
+
+
+def _set_api_error(detail: str, status_code: Optional[int] = None) -> None:
+    # MESDP reports a bad token as HTTP 400 with a 401 inside the JSON body,
+    # e.g. "AuthToken in the request is invalid. Unable to authenticate."
+    detail = str(detail)
+    auth_failed = status_code in (401, 403) or bool(
+        re.search(r'"status_code"\s*:\s*40[13]\b|authtoken|unable to authenticate', detail, re.I))
+    _last_api_error.clear()
+    _last_api_error.update({"detail": detail[:400], "status_code": status_code,
+                            "auth_failed": auth_failed})
+
+
+def build_api_alert_email(shift_info: Dict, final: bool = False) -> Tuple[str, str]:
+    """Alert sent instead of the reminder when MESDP data could not be pulled."""
+    detail = _last_api_error.get("detail") or "Unknown error (see scheduler log)"
+    token_problem = bool(_last_api_error.get("auth_failed"))
+    when = datetime.now().strftime("%d %b %Y %H:%M")
+    kind = "final reminder" if final else "reminder"
+
+    if token_problem:
+        cause = "The MESDP API token was rejected. It has most likely expired or been changed."
+        action = ("Generate a new API token in MESDP, then open <b>MESDP Scheduler Control</b> &rarr; "
+                  "<b>App Configuration</b>, paste it into <b>MESDP Token</b> and click <b>SAVE CONFIG</b>. "
+                  "Leave the other fields as they are.")
+    else:
+        cause = "The scheduler could not get ticket data from MESDP (network, server or API problem)."
+        action = ("Check that MESDP is reachable from this PC. If MESDP is up, the API token may need "
+                  "updating in <b>App Configuration</b>.")
+
+    subject = (f"[ACTION NEEDED] MESDP API error: {shift_info['label']} {kind} not sent"
+               .replace("\r", "").replace("\n", " "))
+    html = f"""<html><body style="font-family:Segoe UI,Arial,sans-serif;color:#1f2937;">
+<div style="max-width:640px;border:1px solid #f3c7a8;border-radius:8px;padding:20px;background:#fff8f3;">
+  <h2 style="margin:0 0 8px;color:#b54708;">Worklog {escape(kind)} not sent</h2>
+  <p style="margin:0 0 12px;">{escape(shift_info['label'])} &middot; {escape(when)}</p>
+  <p style="margin:0 0 12px;"><b>What happened:</b> {escape(cause)}</p>
+  <p style="margin:0 0 12px;"><b>Impact:</b> The team did not get this {escape(kind)}, so they do not have an
+     up-to-date list of In Progress tickets that still need a worklog before the shift ends.
+     Fix this before the next reminder so the team still gets the list in time.</p>
+  <p style="margin:0 0 12px;"><b>What to do:</b> {action}</p>
+  <p style="margin:0 0 4px;color:#6b7280;font-size:12px;">Error detail:</p>
+  <pre style="margin:0;white-space:pre-wrap;font-size:12px;background:#fff;border:1px solid #e5e7eb;padding:8px;border-radius:4px;">{escape(detail)}</pre>
+  <p style="margin:12px 0 0;color:#6b7280;font-size:12px;">The scheduler keeps running and will try again at the next reminder time.</p>
+</div></body></html>"""
+    return subject, html
+
+
+def send_api_alert(shift_info: Dict, final: bool = False) -> bool:
+    subject, html = build_api_alert_email(shift_info, final)
+    print("[ALERT] Sending MESDP API error alert email...")
+    return send_email(subject, html)
+
+
 def get_inprogress_summary(cutoff: Optional[datetime] = None) -> Optional[Dict]:
     """Fetch in-progress ticket summary.
 
@@ -433,18 +490,23 @@ def get_inprogress_summary(cutoff: Optional[datetime] = None) -> Optional[Dict]:
 
             if response.status_code != 200:
                 print(f"[ERROR] API Error {response.status_code}: {response.text}")
+                _set_api_error(f"HTTP {response.status_code}: {response.text}",
+                               status_code=response.status_code)
                 return None
         except requests.exceptions.Timeout:
             print("[ERROR] API Timeout: MESDP service took too long to respond")
+            _set_api_error("Timeout: MESDP took too long to respond")
             return None
         except requests.exceptions.RequestException as e:
             print(f"[ERROR] API Connection Error: {e}")
+            _set_api_error(f"Connection error: {e}")
             return None
 
         try:
             data = response.json()
         except ValueError as e:
             print(f"[ERROR] API returned invalid JSON: {e}")
+            _set_api_error(f"Invalid JSON from MESDP: {e}")
             return None
         requests_list = data.get("requests", [])
         list_info = data.get("list_info", {})
@@ -1366,6 +1428,12 @@ def main():
 
     if tickets is None:
         print("[ERROR] Failed to pull tickets. Exiting.")
+        if args.dry_run:
+            subject, html = build_api_alert_email(shift_info, args.final)
+            save_preview_html(args.preview_file, html)
+            print(f"[skip] Dry-run: API alert not sent ({subject})")
+        else:
+            send_api_alert(shift_info, args.final)
         sys.exit(1)
 
     print(f"[WARN] {len(tickets)} ticket(s) have no worklog for this shift yet.")
