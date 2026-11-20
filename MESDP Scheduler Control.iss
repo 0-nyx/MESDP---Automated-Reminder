@@ -1,6 +1,10 @@
-; Bump this for every release so the installed version is visible in
-; Windows "Installed apps" and in the setup file name.
-#define MyAppVersion "1.1.1"
+; The version comes from version.py (APP_VERSION = "x.y.z"), the same value
+; the app shows next to the Log button. Bump it there for every release.
+#define VerFile FileOpen(AddBackslash(SourcePath) + "version.py")
+#define VerLine Trim(FileRead(VerFile))
+#expr FileClose(VerFile)
+#define VerStart Pos('"', VerLine) + 1
+#define MyAppVersion Copy(VerLine, VerStart, Len(VerLine) - VerStart)
 
 [Setup]
 AppId={{9A4C1B35-5CB5-4F73-9E4E-B1EBA988F4DF}
