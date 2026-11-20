@@ -18,6 +18,7 @@ import customtkinter as ctk  # pyright: ignore[reportMissingImports]
 from config import (CONFIG, USER_CONFIG_FILE, save_user_config,
                     runtime_config_ready, export_config_backup, import_config_backup,
                     reload_config_from_disk)
+from version import APP_VERSION
 
 try:
     from PIL import Image, ImageDraw  # pyright: ignore[reportMissingImports]
@@ -61,6 +62,10 @@ BRAND_SOFT    = "#e8f1fa"
 HERO_MUTED    = "#d6e6f5"   # secondary text on the brand-blue card
 HERO_TRACK    = "#1b5a94"   # progress-bar track on the brand-blue card
 HERO_CHIP     = "#3a82c6"   # quiet chip on the brand-blue card
+HERO_TILE     = "#1d64a6"   # attention tiles on the brand-blue card
+HERO_BAD      = "#fda29b"   # red accent that reads on brand blue
+HERO_WARN     = "#fec84b"   # amber accent that reads on brand blue
+HERO_GOOD     = "#75e0a7"   # green accent that reads on brand blue
 NAVY          = "#164a7e"
 NAVY_HVR      = BRAND_HVR
 NAVY_SOFT     = BRAND_SOFT
@@ -78,9 +83,14 @@ WARN_DIM    = "#fffaeb"
 BAD         = "#b42318"
 BAD_HVR     = "#912018"
 BAD_DIM     = "#fef3f2"
+VIOLET      = "#6941c6"
+VIOLET_DIM  = "#f4f3ff"
 
 # Avatar colours per roster tier.
 TIER_COLOURS = {"L1": "#2472BA", "L1.5": "#0e9384", "L2": "#6941c6"}
+TIER_SOFT    = {"L1": "#e8f1fa", "L1.5": "#e6f6f4", "L2": "#f4f3ff"}
+# L1.5 and L2 work office hours instead of the 12-hour shift.
+TIER_HOURS   = {"L1.5": "09:00 – 18:00", "L2": "09:00 – 18:00"}
 
 FONT_MONO   = "Consolas"
 FONT_UI     = "Segoe UI"
@@ -374,6 +384,16 @@ class SchedulerGui:
         s, e, _ = self._shift_definitions().get(shift, ("", "", []))
         self.shift_badge.configure(text=f"{shift.capitalize()} shift  ·  {s}–{e}",
                                    fg_color=BRAND_SOFT, text_color=NAVY)
+        # Roster date follows the real clock. When the date or the shift
+        # changes (e.g. midnight, 08:00, 20:00), re-read the roster so the
+        # NOW / NEXT groups move on without waiting for the next data pull.
+        if hasattr(self, "roster_date_var"):
+            today = datetime.now()
+            self.roster_date_var.set(today.strftime("%a %d %b %Y"))
+            clock_key = (today.date(), shift)
+            if self._roster_clock_key is not None and clock_key != self._roster_clock_key:
+                self._refresh_roster_only()
+            self._roster_clock_key = clock_key
         self._refresh_schedule_panel()
         self.root.after(20_000, self._update_shift_badge)
 
@@ -507,9 +527,7 @@ class SchedulerGui:
 
         hright = ctk.CTkFrame(header, fg_color="transparent")
         hright.pack(side=tk.RIGHT, padx=28)
-        self.header_clock_var = tk.StringVar(value="")
-        ctk.CTkLabel(hright, textvariable=self.header_clock_var, text_color=TEXT_MUTED,
-                     font=(FONT_UI, 12)).pack(anchor="e", pady=(0, 4))
+        self.header_clock_var = tk.StringVar(value="")   # clock no longer shown in the header
         pills = ctk.CTkFrame(hright, fg_color="transparent")
         pills.pack(anchor="e")
         self.shift_badge = self._make_badge(pills, "Detecting shift", BRAND_SOFT, NAVY)
@@ -550,17 +568,31 @@ class SchedulerGui:
         self.run_now_btn.pack(side=tk.LEFT, padx=(0, 8))
         self.refresh_btn.pack(side=tk.LEFT, padx=(0, 18))
         ctk.CTkFrame(toolbar, fg_color=BORDER, width=1, height=28).pack(side=tk.LEFT, padx=(0, 18))
-        for b in (self.settings_btn, self.app_config_btn, self.terminal_btn):
-            b.pack(side=tk.LEFT, padx=(0, 8))
+        # Shift settings, Connection and Log live in one Settings menu. The
+        # individual buttons stay (unpacked) so the enable/disable code that
+        # references them keeps working.
+        self.menu_btn = ctk.CTkButton(
+            toolbar, text="⚙  Settings  ▾", width=140, command=self._open_settings_menu,
+            **btn, **outline)
+        self.menu_btn.pack(side=tk.LEFT, padx=(0, 8))
+        self.settings_menu = tk.Menu(self.root, tearoff=0, font=(FONT_UI, 11),
+                                     bg=SURFACE, fg=TEXT, activebackground=BRAND_SOFT,
+                                     activeforeground=NAVY, bd=0, relief="flat")
+        self.settings_menu.add_command(label="  Shift settings", command=self.open_shift_settings_window)
+        self.settings_menu.add_command(label="  Connection",
+                                       command=lambda: self._open_runtime_config_window(force=False))
+        self.settings_menu.add_separator()
+        self.settings_menu.add_command(label="  Scheduler log", command=self.open_output_window)
+        ctk.CTkLabel(toolbar, text=f"v{APP_VERSION}", text_color=TEXT_MUTED, fg_color=HEAD_BG,
+                     corner_radius=10, height=24, font=(FONT_UI, 11, "bold")
+                     ).pack(side=tk.LEFT, padx=(4, 0), ipadx=6)
 
-        meta = ctk.CTkFrame(toolbar, fg_color="transparent")
-        meta.pack(side=tk.RIGHT)
-        self.auto_refresh_info_var = tk.StringVar(value="Auto refresh: 30 secs")
-        ctk.CTkLabel(meta, textvariable=self.auto_refresh_info_var, text_color=TEXT_MUTED,
-                     font=(FONT_UI, 11)).pack(anchor="e")
-        self.auto_refresh_count_var = tk.StringVar(value="")
-        ctk.CTkLabel(meta, textvariable=self.auto_refresh_count_var, text_color=TEXT_DIM,
-                     font=(FONT_UI, 11)).pack(anchor="e")
+        # One pill with the live countdown to the next auto refresh.
+        self.auto_refresh_info_var = tk.StringVar(value="")
+        self.auto_refresh_count_var = tk.StringVar(value="")   # no longer shown separately
+        ctk.CTkLabel(toolbar, textvariable=self.auto_refresh_info_var, text_color=TEXT_MUTED,
+                     fg_color=HEAD_BG, corner_radius=12, height=28,
+                     font=(FONT_UI, 11)).pack(side=tk.RIGHT, ipadx=10)
 
         # Summary: brand-blue headline card (what needs doing + progress this
         # shift) next to a white card with the queue figures.
@@ -581,15 +613,46 @@ class SchedulerGui:
         self.hero_title_var = tk.StringVar(value="Loading ticket data…")
         ctk.CTkLabel(htext, textvariable=self.hero_title_var, text_color=ON_NAVY,
                      font=(FONT_UI, 17, "bold"), height=26).pack(anchor="w")
-        self.hero_caption_var = tk.StringVar(value="")
-        ctk.CTkLabel(htext, textvariable=self.hero_caption_var, text_color=HERO_MUTED,
-                     font=(FONT_UI, 12), height=20).pack(anchor="w")
+        self.hero_caption_var = tk.StringVar(value="")  # kept for callers; the chip below shows it
+        # Next-reminder chip: time, shift and a countdown pill, or a stopped
+        # notice when the scheduler is not running.
+        self.hero_next = ctk.CTkFrame(htext, fg_color=HERO_TILE, corner_radius=14, height=28)
+        self.hero_next.pack(anchor="w", pady=(6, 0))
+        self.hero_next_dot = ctk.CTkFrame(self.hero_next, width=8, height=8, corner_radius=4,
+                                          fg_color=HERO_GOOD)
+        self.hero_next_dot.pack(side=tk.LEFT, padx=(12, 8))
+        self.hero_next_label = ctk.CTkLabel(self.hero_next, text="", text_color=HERO_MUTED, height=28,
+                                            font=(FONT_UI, 10, "bold"))
+        self.hero_next_label.pack(side=tk.LEFT)
+        self.hero_next_time = ctk.CTkLabel(self.hero_next, text="", text_color=ON_NAVY, height=28,
+                                           font=(FONT_UI, 13, "bold"))
+        self.hero_next_time.pack(side=tk.LEFT, padx=(8, 0))
+        self.hero_next_shift = ctk.CTkLabel(self.hero_next, text="", text_color=HERO_MUTED, height=28,
+                                            font=(FONT_UI, 11))
+        self.hero_next_shift.pack(side=tk.LEFT, padx=(6, 0))
+        self.hero_next_eta = ctk.CTkLabel(self.hero_next, text="", fg_color=ON_NAVY, text_color=BRAND,
+                                          corner_radius=10, height=20, font=(FONT_UI, 10, "bold"))
+        self.hero_next_eta.pack(side=tk.LEFT, padx=(10, 4), ipadx=6)
+        # Two attention tiles: tickets never updated and tickets idle 3+ days.
         flags = ctk.CTkFrame(top, fg_color="transparent")
-        flags.pack(side=tk.RIGHT, anchor="n")
-        self.hero_norec = self._make_badge(flags, "", HERO_CHIP, HERO_MUTED)
-        self.hero_norec.pack(anchor="e", pady=(2, 6))
-        self.hero_stale = self._make_badge(flags, "", HERO_CHIP, HERO_MUTED)
-        self.hero_stale.pack(anchor="e")
+        flags.pack(side=tk.RIGHT, anchor="center")
+        self.hero_flags: dict[str, tuple[ctk.CTkFrame, ctk.CTkLabel, ctk.CTkFrame, str]] = {}
+        for key, caption, accent in (("no_record", "NEVER UPDATED", HERO_BAD),
+                                     ("stale",     "IDLE 3+ DAYS",  HERO_WARN)):
+            tile = ctk.CTkFrame(flags, fg_color=HERO_TILE, corner_radius=10,
+                                border_width=1, border_color=HERO_TILE, width=132, height=66)
+            tile.pack(side=tk.LEFT, padx=(10, 0))
+            tile.pack_propagate(False)
+            head = ctk.CTkFrame(tile, fg_color="transparent")
+            head.pack(anchor="w", padx=12, pady=(9, 0))
+            dot = ctk.CTkFrame(head, width=8, height=8, corner_radius=4, fg_color=HERO_MUTED)
+            dot.pack(side=tk.LEFT, padx=(0, 6))
+            ctk.CTkLabel(head, text=caption, text_color=HERO_MUTED, height=14,
+                         font=(FONT_UI, 10, "bold")).pack(side=tk.LEFT)
+            value = ctk.CTkLabel(tile, text="–", text_color=ON_NAVY, height=30,
+                                 font=(FONT_UI, 22, "bold"))
+            value.pack(anchor="w", padx=12)
+            self.hero_flags[key] = (tile, value, dot, accent)
 
         prog = ctk.CTkFrame(hero, fg_color="transparent")
         prog.pack(fill=tk.X, padx=24, pady=(6, 18))
@@ -606,31 +669,47 @@ class SchedulerGui:
         self.hero_bar.pack(fill=tk.X, pady=(4, 0))
         self.hero_bar.set(0)
 
+        # Queue figures: four tinted tiles, each with its own colour and icon.
         stats = self._make_card(band)
         stats.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
         stats.grid_columnconfigure((0, 1), weight=1, uniform="stat")
-        stats.grid_rowconfigure((0, 1), weight=1)
+        stats.grid_rowconfigure((0, 1), weight=1, uniform="statrow")
         self.stat: dict[str, tuple[ctk.CTkLabel, tk.StringVar]] = {}
-        for i, (key, label, note) in enumerate([
-            ("in_progress", "In progress", "in queue"),
-            ("on_hold",     "On hold",     "in queue"),
-            ("opened",      "Opened",      "this shift"),
-            ("closed",      "Closed",      "this shift"),
+        self.stat_colour: dict[str, str] = {}
+        for i, (key, label, note, icon, colour, tint) in enumerate([
+            ("in_progress", "In progress", "in queue",   "▶", BRAND,     BRAND_SOFT),
+            ("on_hold",     "On hold",     "in queue",   "❚❚", WARN,      WARN_DIM),
+            ("opened",      "Opened",      "this shift", "+", VIOLET,    VIOLET_DIM),
+            ("closed",      "Closed",      "this shift", "✓", GOOD,      GOOD_DIM),
         ]):
             r, c = divmod(i, 2)
-            cell = ctk.CTkFrame(stats, fg_color="transparent")
-            cell.grid(row=r, column=c, sticky="w", padx=22,
-                      pady=(14, 2) if r == 0 else (2, 14))
-            ctk.CTkLabel(cell, text=label, text_color=TEXT_MUTED, font=(FONT_UI, 11),
-                         height=16).pack(anchor="w")
-            line = ctk.CTkFrame(cell, fg_color="transparent")
+            tile = ctk.CTkFrame(stats, fg_color=tint, corner_radius=10)
+            tile.grid(row=r, column=c, sticky="nsew",
+                      padx=(12, 5) if c == 0 else (5, 12),
+                      pady=(12, 5) if r == 0 else (5, 12))
+            inner = ctk.CTkFrame(tile, fg_color="transparent")
+            inner.pack(fill=tk.BOTH, expand=True, padx=12, pady=8)
+            # Fixed-size frame so the icon stays a circle (a label pads its text).
+            badge = ctk.CTkFrame(inner, width=34, height=34, corner_radius=17, fg_color=colour)
+            badge.pack(side=tk.LEFT, padx=(0, 12))
+            badge.pack_propagate(False)
+            ctk.CTkLabel(badge, text=icon, text_color=ON_NAVY, fg_color="transparent",
+                         width=1, height=1, font=(FONT_UI, 13 if icon != "❚❚" else 9, "bold")
+                         ).place(relx=0.5, rely=0.5, anchor="center")
+            txt = ctk.CTkFrame(inner, fg_color="transparent")
+            txt.pack(side=tk.LEFT, fill=tk.Y)
+            ctk.CTkLabel(txt, text=label.upper(), text_color=TEXT_MUTED,
+                         font=(FONT_UI, 10, "bold"), height=14).pack(anchor="w")
+            line = ctk.CTkFrame(txt, fg_color="transparent")
             line.pack(anchor="w")
-            value = ctk.CTkLabel(line, text="–", text_color=TEXT_DIM, font=(FONT_UI, 24, "bold"), height=32)
+            value = ctk.CTkLabel(line, text="–", text_color=TEXT_DIM,
+                                 font=(FONT_UI, 22, "bold"), height=30)
             value.pack(side=tk.LEFT)
             note_var = tk.StringVar(value=note)
-            ctk.CTkLabel(line, textvariable=note_var, text_color=TEXT_DIM, font=(FONT_UI, 11),
-                         height=32).pack(side=tk.LEFT, padx=(8, 0), anchor="s")
+            ctk.CTkLabel(line, textvariable=note_var, text_color=TEXT_MUTED, font=(FONT_UI, 11),
+                         height=30).pack(side=tk.LEFT, padx=(6, 0), anchor="s")
             self.stat[key] = (value, note_var)
+            self.stat_colour[key] = colour
 
         # Body: schedule + roster in a sidebar, ticket table takes the rest
         body = ctk.CTkFrame(outer, fg_color="transparent")
@@ -638,28 +717,34 @@ class SchedulerGui:
         body.grid_columnconfigure(0, weight=0, minsize=430)
         body.grid_columnconfigure(1, weight=1)
         body.grid_rowconfigure(0, weight=1)
-        side = ctk.CTkFrame(body, fg_color="transparent", width=430)
-        side.grid(row=0, column=0, sticky="nsew", padx=(0, 16))
+        # The whole sidebar (schedule + roster) scrolls as one, so a long
+        # roster or a short window never squeezes the roster into a tiny box.
+        side = ctk.CTkScrollableFrame(body, fg_color="transparent", width=414,
+                                      scrollbar_button_color=BORDER_LT,
+                                      scrollbar_button_hover_color=BORDER)
+        side.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
 
-        sc = self._make_card(side)
-        sc.pack(fill=tk.X, pady=(0, 14))
-        self._section_title(sc, "Reminder schedule").pack(fill=tk.X, padx=18, pady=(14, 8))
-        # The next reminder and countdown are shown on the blue summary card.
+        # The next reminder and countdown are shown on the blue summary card;
+        # shift hours are shown next to each shift in the duty roster.
         self.next_reminder_var = tk.StringVar(value="–")
         self.next_reminder_eta_var = tk.StringVar(value="")
-        self.schedule_rows = ctk.CTkFrame(sc, fg_color="transparent")
-        self.schedule_rows.pack(fill=tk.X, padx=18, pady=(0, 14))
-        self._schedule_rows_key = None
         self.scheduler_detail = tk.StringVar(value="Checking scheduler…")  # shown in the log only
 
         rc = self._make_card(side)
-        rc.pack(fill=tk.BOTH, expand=True)
-        self.roster_note_var = tk.StringVar(value="")  # set once data arrives
-        self._section_title(rc, "Duty roster", self.roster_note_var).pack(fill=tk.X, padx=18, pady=(14, 4))
-        self.roster_body = ctk.CTkScrollableFrame(rc, fg_color="transparent", height=120,
-                                                  scrollbar_button_color=BORDER_LT,
-                                                  scrollbar_button_hover_color=BORDER)
-        self.roster_body.pack(fill=tk.BOTH, expand=True, padx=(12, 6), pady=(0, 10))
+        rc.pack(fill=tk.X, pady=(0, 4))
+        self.roster_note_var = tk.StringVar(value="")  # no longer shown
+        # Title with today's date (real clock; _update_shift_badge keeps it current).
+        rtitle = ctk.CTkFrame(rc, fg_color="transparent")
+        rtitle.pack(fill=tk.X, padx=18, pady=(14, 8))
+        ctk.CTkLabel(rtitle, text="DUTY ROSTER", text_color=NAVY,
+                     font=(FONT_UI, 12, "bold")).pack(side=tk.LEFT)
+        self.roster_date_var = tk.StringVar(value=datetime.now().strftime("%a %d %b %Y"))
+        ctk.CTkLabel(rtitle, textvariable=self.roster_date_var, height=22, corner_radius=6,
+                     fg_color=HEAD_BG, text_color=TEXT_MUTED,
+                     font=(FONT_UI, 11, "bold")).pack(side=tk.LEFT, padx=(10, 0), ipadx=8)
+        self._roster_clock_key = None
+        self.roster_body = ctk.CTkFrame(rc, fg_color="transparent")
+        self.roster_body.pack(fill=tk.X, padx=(12, 12), pady=(0, 12))
         self._render_roster(None, loading=True)
 
         # Ticket table
@@ -805,22 +890,9 @@ class SchedulerGui:
                 self.hero_caption_var.set(
                     f"Next reminder {hh:02d}:{mm:02d}, in {eta}" if running
                     else "Scheduler is stopped: no reminders will be sent")
-        rows = []
-        for sn, (s, e, _offs) in self._shift_definitions().items():
-            times = [f"{(m // 60):02d}:{(m % 60):02d}" for m, n, _f in slots if n == sn]
-            rows.append((sn.capitalize(), f"{s} – {e}", "  ·  ".join(times)))
-        if rows != self._schedule_rows_key:
-            self._schedule_rows_key = rows
-            for w in self.schedule_rows.winfo_children():
-                w.destroy()
-            for c, head in enumerate(("SHIFT", "HOURS", "REMINDERS")):
-                ctk.CTkLabel(self.schedule_rows, text=head, text_color=TEXT_MUTED,
-                             font=(FONT_UI, 10, "bold")).grid(row=0, column=c, sticky="w", padx=(0, 28))
-            for r, row in enumerate(rows, start=1):
-                for c, val in enumerate(row):
-                    ctk.CTkLabel(self.schedule_rows, text=val, text_color=TEXT,
-                                 font=(FONT_UI, 12, "bold" if c == 0 else "normal")).grid(
-                        row=r, column=c, sticky="w", padx=(0, 28))
+            if hasattr(self, "hero_next"):
+                self._set_hero_next(f"{hh:02d}:{mm:02d}",
+                                    f"·  {sn.capitalize()}{' (final)' if final else ''}", eta, running)
         self.header_clock_var.set(now.strftime("%a %d %b %Y  ·  %H:%M"))
 
     def _render_roster(self, roster, loading: bool = False) -> None:
@@ -840,47 +912,91 @@ class SchedulerGui:
         if not isinstance(roster, dict) or roster.get("unavailable"):
             note("Roster file could not be read."); return
 
-        for idx, (kind, res) in enumerate((("Current shift", roster.get("current")),
-                                           ("Next shift", roster.get("next")))):
-            block = ctk.CTkFrame(self.roster_body, fg_color="transparent")
-            block.pack(fill=tk.X, pady=(0 if idx == 0 else 10, 0))
-            head = kind.upper()
-            if res:
-                head += f"   {str(res.get('shift') or '').capitalize()}"
-                if res.get("date"):
-                    try:
-                        head += f"  ·  {datetime.strptime(res['date'][:10], '%Y-%m-%d'):%a %d %b}"
-                    except ValueError:
-                        pass
-            ctk.CTkLabel(block, text=head, text_color=NAVY if idx == 0 else TEXT_MUTED,
-                         font=(FONT_UI, 10, "bold")).pack(anchor="w")
+        # Every group (a shift, or the office-hours tiers) is drawn the same
+        # way: tag, title, hours pill, date, then one row per tier.
+        groups = []
+        for idx, res in enumerate((roster.get("current"), roster.get("next"))):
+            current = idx == 0
             if not res:
-                ctk.CTkLabel(block, text="Not found in the roster for this date.",
-                             text_color=TEXT_MUTED, font=(FONT_UI, 12)).pack(anchor="w")
+                groups.append(("NOW" if current else "NEXT", "Shift", None, None, current, None))
                 continue
-            people = res.get("people") or []
-            if not people:
-                ctk.CTkLabel(block, text="Nobody rostered.", text_color=TEXT_MUTED,
-                             font=(FONT_UI, 12)).pack(anchor="w")
-                continue
+            shift_key = str(res.get("shift") or "").lower()
+            hours = self._shift_definitions().get(shift_key)
+            day = ""
+            if res.get("date"):
+                try:
+                    day = f"{datetime.strptime(res['date'][:10], '%Y-%m-%d'):%a %d %b}"
+                except ValueError:
+                    day = ""
             tiers: dict[str, list[dict]] = {}
-            for p in people:
+            for p in res.get("people") or []:
                 tiers.setdefault(p.get("tier") or "Team", []).append(p)
-            for tier, members in tiers.items():
-                row = ctk.CTkFrame(block, fg_color="transparent")
-                row.pack(anchor="w", fill=tk.X, pady=(3, 0))
-                ctk.CTkLabel(row, text=tier, width=52, anchor="nw", text_color=TEXT_MUTED,
-                             font=(FONT_UI, 11, "bold")).pack(side=tk.LEFT, anchor="n", pady=(3, 0))
-                chips = ctk.CTkFrame(row, fg_color="transparent")
-                chips.pack(side=tk.LEFT, fill=tk.X, expand=True)
-                line = None
-                for n, p in enumerate(members):
-                    if n % 2 == 0:
-                        line = ctk.CTkFrame(chips, fg_color="transparent")
-                        line.pack(anchor="w", pady=(0, 6))
-                    self._person_chip(line, str(p.get("name") or "?"), tier,
-                                      first=bool(p.get("first_contact")) and idx == 0,
-                                      current=idx == 0).pack(side=tk.LEFT, padx=(0, 6))
+            shift_tiers = {t: m for t, m in tiers.items() if t not in TIER_HOURS}
+            office_tiers = {t: m for t, m in tiers.items() if t in TIER_HOURS}
+            groups.append(("NOW" if current else "NEXT", f"{shift_key.capitalize()} shift",
+                           f"{hours[0]} – {hours[1]}" if hours else "", day, current, shift_tiers))
+            if office_tiers:
+                office_hours = TIER_HOURS[next(iter(office_tiers))]
+                groups.append(("DAY" if current else "NEXT", "Office hours", office_hours, day,
+                               current, office_tiers))
+
+        for gi, (tag, title, hours, day, current, tiers) in enumerate(groups):
+            if gi > 0:
+                # Plain Tk line: a 1 px CTkFrame is not drawn.
+                tk.Frame(self.roster_body, height=1, bg="#e4e7ec", bd=0,
+                         highlightthickness=0).pack(fill=tk.X, pady=(10, 12))
+            # The date is shown once, next to the DUTY ROSTER title.
+            self._roster_group(tag, title, hours, None, current, tiers)
+
+    ROSTER_PER_LINE = 3
+
+    def _roster_group(self, tag: str, title: str, hours: str | None, day: str | None,
+                      current: bool, tiers: dict | None) -> None:
+        block = ctk.CTkFrame(self.roster_body, fg_color="transparent")
+        block.pack(fill=tk.X)
+        head = ctk.CTkFrame(block, fg_color="transparent")
+        head.pack(anchor="w", pady=(0, 8))
+        ctk.CTkLabel(head, text=tag, corner_radius=6, height=20, width=44,
+                     fg_color=BRAND if current else HEAD_BG,
+                     text_color=ON_NAVY if current else TEXT_MUTED,
+                     font=(FONT_UI, 9, "bold")).pack(side=tk.LEFT, padx=(0, 10))
+        ctk.CTkLabel(head, text=title, text_color=NAVY if current else TEXT, height=20,
+                     font=(FONT_UI, 12, "bold")).pack(side=tk.LEFT)
+        if hours:
+            ctk.CTkLabel(head, text=hours, height=20, corner_radius=6,
+                         fg_color=BRAND_SOFT if current else HEAD_BG,
+                         text_color=NAVY if current else TEXT_MUTED,
+                         font=(FONT_UI, 10, "bold")).pack(side=tk.LEFT, padx=(8, 0), ipadx=6)
+        if day:
+            ctk.CTkLabel(head, text=f"·  {day}", text_color=TEXT_MUTED, height=20,
+                         font=(FONT_UI, 11)).pack(side=tk.LEFT, padx=(6, 0))
+
+        def note(text: str) -> None:
+            ctk.CTkLabel(block, text=text, text_color=TEXT_MUTED,
+                         font=(FONT_UI, 12)).pack(anchor="w", padx=(54, 0))
+        if tiers is None:
+            note("Not found in the roster for this date."); return
+        if not tiers:
+            note("Nobody rostered."); return
+
+        for tier, members in tiers.items():
+            row = ctk.CTkFrame(block, fg_color="transparent")
+            row.pack(anchor="w", fill=tk.X, pady=(0, 2))
+            # Tier tag under the group tag, same width, so names line up.
+            ctk.CTkLabel(row, text=tier, width=44, height=24, corner_radius=6,
+                         fg_color=TIER_SOFT.get(tier, HEAD_BG) if current else HEAD_BG,
+                         text_color=TIER_COLOURS.get(tier, TEXT_MUTED) if current else TEXT_MUTED,
+                         font=(FONT_UI, 10, "bold")).pack(side=tk.LEFT, anchor="n", padx=(0, 10), pady=(3, 0))
+            chips = ctk.CTkFrame(row, fg_color="transparent")
+            chips.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            line = None
+            for n, p in enumerate(members):
+                if n % self.ROSTER_PER_LINE == 0:
+                    line = ctk.CTkFrame(chips, fg_color="transparent")
+                    line.pack(anchor="w", pady=(0, 6))
+                self._person_chip(line, str(p.get("name") or "?"), tier,
+                                  first=bool(p.get("first_contact")) and current,
+                                  current=current).pack(side=tk.LEFT, padx=(0, 6))
 
     def _person_chip(self, parent, name: str, tier: str, first: bool, current: bool) -> ctk.CTkFrame:
         """Rounded chip: initials avatar coloured by tier, then the name."""
@@ -929,6 +1045,45 @@ class SchedulerGui:
                 return f"{m // 60:02d}:{m % 60:02d}"
         return None
 
+    def _open_settings_menu(self) -> None:
+        """Drop the Settings menu just under its button."""
+        b = self.menu_btn
+        try:
+            self.settings_menu.tk_popup(b.winfo_rootx(), b.winfo_rooty() + b.winfo_height() + 4)
+        finally:
+            self.settings_menu.grab_release()
+
+    def _set_hero_next(self, hhmm: str, shift_text: str, eta: str, running: bool) -> None:
+        """Next-reminder chip on the blue card."""
+        if running:
+            self.hero_next_dot.configure(fg_color=HERO_GOOD)
+            self.hero_next_label.configure(text="NEXT REMINDER", text_color=HERO_MUTED)
+            self.hero_next_time.configure(text=hhmm)
+            self.hero_next_shift.configure(text=shift_text)
+            self.hero_next_eta.configure(text=f"in {eta}")
+            for w in (self.hero_next_time, self.hero_next_shift):
+                w.pack(side=tk.LEFT, padx=(8 if w is self.hero_next_time else 6, 0))
+            self.hero_next_eta.pack(side=tk.LEFT, padx=(10, 4), ipadx=6)
+        else:
+            self.hero_next_dot.configure(fg_color=HERO_BAD)
+            self.hero_next_label.configure(text="Scheduler stopped  ·  no reminders will be sent",
+                                           text_color=ON_NAVY)
+            for w in (self.hero_next_time, self.hero_next_shift, self.hero_next_eta):
+                w.pack_forget()
+            self.hero_next_label.pack_configure(padx=(0, 14))
+            return
+        self.hero_next_label.pack_configure(padx=(0, 0))
+
+    def _set_hero_flag(self, key: str, count: int | None) -> None:
+        """Attention tile on the blue card: accent dot and border when the
+        count is above zero, quiet when zero, a dash when there is no data."""
+        tile, value, dot, accent = self.hero_flags[key]
+        active = bool(count)
+        value.configure(text="–" if count is None else str(count),
+                        text_color=ON_NAVY if count is not None else HERO_MUTED)
+        dot.configure(fg_color=accent if active else HERO_MUTED)
+        tile.configure(border_color=accent if active else HERO_TILE)
+
     def _set_kpis(self, values: dict, captions: dict | None = None) -> None:
         captions = captions or {}
         pending = values.get("pending")
@@ -938,36 +1093,29 @@ class SchedulerGui:
             self.hero_progress_var.set("")
             self.hero_pct_var.set("")
             self.hero_bar.set(0)
-            for chip in (self.hero_norec, self.hero_stale):
-                chip.configure(text="", fg_color=BRAND)
+            for key in self.hero_flags:
+                self._set_hero_flag(key, None)
         else:
-            deadline = self._next_reminder_for_shift(self._get_current_shift())
             self.hero_value.configure(text=str(pending))
             if pending == 0:
                 self.hero_title_var.set("All tickets have a worklog this shift")
             else:
                 noun = "ticket needs" if pending == 1 else "tickets need"
-                self.hero_title_var.set(f"{noun} a worklog" + (f" before {deadline}" if deadline else " this shift"))
+                self.hero_title_var.set(f"{noun} worklog update")
 
-            norec, stale = values.get("no_record") or 0, values.get("stale") or 0
-            self.hero_norec.configure(text=f"{norec} never updated",
-                                      fg_color=BAD_DIM if norec else HERO_CHIP,
-                                      text_color=BAD if norec else HERO_MUTED)
-            self.hero_stale.configure(text=f"{stale} idle 3+ days",
-                                      fg_color=WARN_DIM if stale else HERO_CHIP,
-                                      text_color=WARN if stale else HERO_MUTED)
+            self._set_hero_flag("no_record", values.get("no_record") or 0)
+            self._set_hero_flag("stale", values.get("stale") or 0)
 
             total, updated = values.get("total") or 0, values.get("updated") or 0
             share = updated / total if total else 1.0
-            since = captions.get("cutoff")
-            self.hero_progress_var.set(
-                f"{updated} of {total} In Progress tickets updated" + (f" since {since}" if since else ""))
+            self.hero_progress_var.set(f"{updated} of {total} In Progress tickets updated")
             self.hero_pct_var.set(f"{share:.0%}")
             self.hero_bar.set(share)
 
         for key, (label, note) in self.stat.items():
             v = values.get(key)
-            label.configure(text="–" if v is None else str(v), text_color=TEXT_DIM if v is None else TEXT)
+            label.configure(text="–" if v is None else str(v),
+                            text_color=TEXT_DIM if v is None else self.stat_colour.get(key, TEXT))
             if key in captions:
                 note.set(captions[key])
 
@@ -2421,7 +2569,7 @@ class SchedulerGui:
         if roster_is_current:
             self._render_roster(data.get("roster"))
         shift = str(data.get("shift") or "")
-        self.roster_note_var.set("Highlighted = on standby this week")
+        self.roster_note_var.set("")
 
         summary = data.get("summary")
         activity = data.get("activity") or {}
@@ -2704,7 +2852,7 @@ class SchedulerGui:
     def _set_buttons_state(self, state: str) -> None:
         for btn in [self.start_stop_btn,
                     self.refresh_btn, self.run_now_btn, self.settings_btn, self.app_config_btn,
-                    self.terminal_btn]:
+                    self.terminal_btn, self.menu_btn]:
             btn.configure(state=state)
 
     def run_one_time_report(self) -> None:
@@ -2758,7 +2906,7 @@ class SchedulerGui:
             self.auto_refresh_countdown_job = None
 
         if not self.auto_refresh_var.get():
-            self.auto_refresh_info_var.set("Auto refresh: off")
+            self.auto_refresh_info_var.set("↻  Auto refresh off")
             self.auto_refresh_count_var.set("")
             return
 
@@ -2780,9 +2928,9 @@ class SchedulerGui:
         else:
             unit_text = f"{interval_s} sec{'s' if interval_s != 1 else ''}"
 
-        self.auto_refresh_info_var.set(f"Auto refresh every {unit_text}")
-        self.auto_refresh_count_var.set(
-            "Loading ticket data…" if self._data_loading else f"Next status check in {countdown}")
+        self.auto_refresh_info_var.set(
+            "↻  Loading ticket data…" if self._data_loading else f"↻  Auto refresh in {countdown}")
+        self.auto_refresh_count_var.set(f"every {unit_text}")
         self.auto_refresh_countdown_job = self.root.after(1000, self._update_auto_refresh_countdown_label)
 
     def _set_start_stop_button_for_state(self, state: str) -> None:
